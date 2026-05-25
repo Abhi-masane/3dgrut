@@ -26,6 +26,7 @@ from torch.utils.data import Dataset
 from threedgrut.utils.logger import logger
 
 from .camera_models import (
+    EquirectangularCameraModelParameters, # Thesis: newly added for equirectangular support
     OpenCVFisheyeCameraModelParameters,
     OpenCVPinholeCameraModelParameters,
     ShutterType,
@@ -144,7 +145,35 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
     def _store_camera_params_cpu(self):
         """Store camera parameters on CPU for multiprocessing compatibility."""
+        
+#============================================================================================        
+        def create_equirectangular_camera(w, h): #Thesis: Added support for equirectangular cameras by generating rays based on pixel coordinates and camera model parameters
+            # Generating UV coordinates
+            u = np.tile(np.arange(w), h)
+            v = np.arange(h).repeat(w)
+            out_shape = (1, h, w, 3)
 
+            params = EquirectangularCameraModelParameters(
+                resolution=np.array([w, h], dtype=np.int64),
+                shutter_type=ShutterType.GLOBAL,
+            )
+
+            int_pixel_coords = torch.tensor(np.stack([u, v], axis=1), dtype=torch.int32)
+            image_points = pixels_to_image_points(int_pixel_coords)
+            rays_d_cam = image_points_to_camera_rays(params, image_points)
+            rays_o_cam = torch.zeros_like(rays_d_cam)
+            pixel_coords = create_pixel_coords(w, h)
+            return (
+                {"resolution": [w, h], "type": "equirectangular"},
+                rays_o_cam.to(torch.float32).reshape(out_shape),
+                rays_d_cam.to(torch.float32).reshape(out_shape),
+                type(params).__name__,
+                pixel_coords,
+            )
+
+
+#============================================================================================
+        
         def create_pinhole_camera(focalx, focaly, w, h):
             # Generate UV coordinates
             u = np.tile(np.arange(w), h)
@@ -243,6 +272,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 focal_length_x = intr.params[0] / scaling_factor
                 focal_length_y = intr.params[1] / scaling_factor
                 self.intrinsics[intr.id] = create_pinhole_camera(focal_length_x, focal_length_y, width, height)
+            
+            elif intr.model == "EQUIRECTANGULAR": #Theis: Added support for equirectangular cameras by generating rays based on pixel coordinates and camera model parameters
+                # Thesis: equirectangular camera model
+                # Stored as custom COLMAP model_id=99 in create_v2_colmap.py
+                # No focal length needed — rays computed from lon/lat geometry only
+                self.intrinsics[intr.id] = create_equirectangular_camera(width, height)
 
             elif intr.model == "OPENCV_FISHEYE":
                 params = copy.deepcopy(intr.params)

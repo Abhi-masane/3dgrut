@@ -30,6 +30,7 @@ class Batch:
     intrinsics: Optional[list] = None
     intrinsics_OpenCVPinholeCameraModelParameters: Optional[dict] = None
     intrinsics_OpenCVFisheyeCameraModelParameters: Optional[dict] = None
+    intrinsics_EquirectangularCameraModelParameters: Optional[dict] = None  # Thesis: added for equirectangular support
     # Camera/frame indices for post-processing
     camera_idx: int = -1  # 0-based camera index
     frame_idx: int = -1  # 0-based frame index (global across split)

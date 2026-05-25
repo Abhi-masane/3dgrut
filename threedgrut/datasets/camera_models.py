@@ -42,7 +42,7 @@ class CameraModelParameters:
     resolution: np.ndarray  #: Width and height of the image in pixels (int64, [2,])
     shutter_type: ShutterType  #: Shutter type of the camera's imaging sensor
 
-    def __post_init__(self):
+    def __post_init__(self):    
         # Sanity checks
         assert self.resolution.shape == (2,)
         assert self.resolution.dtype == np.dtype("int64")
@@ -112,6 +112,27 @@ class OpenCVFisheyeCameraModelParameters(CameraModelParameters, dataclasses_json
         assert self.radial_coeffs.dtype == np.dtype("float32")
         assert self.max_angle > 0.0
 
+#============================================================================================
+#====Equirectangular camera model parameters====#
+
+
+class EquirectangularCameraModelParameters(CameraModelParameters):
+    """Represents Equirectangular-specific camera model parameters
+
+    Calculations:
+    Theta = (u / W * 2*pi) - pi --> -pi to pi  -- azimuth
+    Phi = (v / H * pi) - (pi/2) --> -pi/2 to pi/2 -- 
+    
+    ray :
+    x = cos(phi) * sin(theta) -- right
+    y = sin(phi)              -- up 
+    z = cos(phi) * cos(theta) -- forward
+
+
+    """
+    pass
+
+##============================================================================================
 
 def _eval_poly_horner(poly_coefficients: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """Evaluates a polynomial y=f(x) (given by poly_coefficients) at points x using
@@ -161,6 +182,29 @@ def image_points_to_camera_rays(
 
     dtype: torch.dtype = torch.float32
 
+#============================================================================================================================
+
+    if isinstance(camera_model_parameters, EquirectangularCameraModelParameters):
+
+        W = int(camera_model_parameters.resolution[0])
+        H = int(camera_model_parameters.resolution[1])
+
+        u = image_points[:, 0].to(torch.float32).to(device)
+        v = image_points[:, 1].to(torch.float32).to(device)
+
+        theta = (u/W * 2 * torch.pi) - torch.pi
+        phi = torch.pi/2 - (v/H * torch.pi)
+
+        # Convention changed from  ray_y = -torch.sin(phi) (right-up-front) --> ray_y = torch.sin(phi) (right-down-front)
+        ray_x = torch.cos(phi) * torch.sin(theta)
+        ray_y = torch.sin(phi)
+        ray_z = torch.cos(phi) * torch.cos(theta)
+
+        cam_rays = torch.stack((ray_x, ray_y, ray_z), dim=1)
+        return cam_rays
+
+
+#============================================================================================================================
     principal_point = torch.tensor(camera_model_parameters.principal_point, dtype=dtype, device=device)
     focal_length = torch.tensor(camera_model_parameters.focal_length, dtype=dtype, device=device)
     resolution = torch.tensor(camera_model_parameters.resolution.astype(np.int32), device=device)

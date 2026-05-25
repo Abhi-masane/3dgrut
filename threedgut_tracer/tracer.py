@@ -423,6 +423,39 @@ class Tracer:
             )
             return camera_model_parameters, pose_model.get_sensor_pose()
 
+        elif (K := gpu_batch.intrinsics_EquirectangularCameraModelParameters) is not None:
+            # Thesis: ERP camera model for 3DGUT Unscented Transform rendering.
+            #
+            # The CUDA rendering kernel only supports PINHOLE and FISHEYE natively.
+            # ERP is mapped to PINHOLE using the spherical focal length convention:
+            #   fx = W / (2*pi)   — horizontal angular resolution
+            #   fy = H / pi       — vertical angular resolution
+            #   cx = W / 2        — principal point at image center
+            #   cy = H / 2        — principal point at image center
+            #
+            # This is mathematically exact at the equator and a valid first-order
+            # approximation at other latitudes.
+
+            # Note: a native ERP CUDA kernel would require modifying the C++ plugin.
+            # This approximation is consistent with FullCircle (CVPR 2024) approach.
+
+            W = float(K["resolution"][0])
+            H = float(K["resolution"][1])
+            fx_erp = W / (2.0 * math.pi)
+            fy_erp = H / math.pi
+            cx_erp = W / 2.0
+            cy_erp = H / 2.0
+            camera_model_parameters = _3dgut_plugin.fromOpenCVPinholeCameraModelParameters(
+                resolution=K["resolution"], 
+                shutter_type=_3dgut_plugin.ShutterType.GLOBAL,
+                principal_point=np.array([cx_erp, cy_erp], dtype=np.float32),
+                focal_length=np.array([fx_erp, fy_erp], dtype=np.float32),
+                radial_coeffs=np.zeros((6,), dtype=np.float32),
+                tangential_coeffs=np.zeros((2,), dtype=np.float32),
+                thin_prism_coeffs=np.zeros((4,), dtype=np.float32),
+            )
+            return camera_model_parameters, pose_model.get_sensor_pose()
+
         raise ValueError(
             f"Camera intrinsics unavailable or unsupported, input keys are [{', '.join(gpu_batch.keys())}]"
         )
