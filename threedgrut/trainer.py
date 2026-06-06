@@ -467,6 +467,9 @@ class Trainer3DGRUT:
         if mask is not None:
             rgb_gt = rgb_gt * mask
             rgb_pred = rgb_pred * mask
+#============================================================================================================================
+        
+        # V3 Thesis: solid angle loss weighting for Equirectangular dataset:
 
         # L1 loss
         loss_l1 = torch.zeros(1, device=self.device)
@@ -475,28 +478,73 @@ class Trainer3DGRUT:
             with torch.cuda.nvtx.range(f"loss-l1"):
                 l1_per_pixel = torch.abs(rgb_pred - rgb_gt)  # (1, H, W, 3)
 
-                # ── V3 Thesis: solid angle loss weighting ──────────────────────
                 # Controlled by config flag loss.use_solid_angle_loss
                 # false --> V1/V2 equal pixel weights (original behaviour)
                 # true  --> V3/V4 sin(pi*v/H) weighting per pixel row
                 #
                 # sin(pi*v/H) weights each row by its real-world solid angle.
+
+                # if getattr(self.conf.loss, 'use_solid_angle_loss', False):
+                #     H = rgb_gt.shape[1]
+                #     v_coords = torch.arange(H, device=rgb_gt.device,
+                #                             dtype=torch.float32)
+                #     # sin(pi*v/H): 0 at poles, 1 at equator
+                #     weights = torch.sin(torch.pi * v_coords / H)
+                #     # reshape to (1,H,1,1) for broadcasting over batch,W,channels
+                #     weights = weights.reshape(1, H, 1, 1)
+                #     # normalize so total loss magnitude stays same as unweighted
+                #     weights = weights / (weights.mean() + 1e-8)
+                #     loss_l1 = (l1_per_pixel * weights).mean()
+                # else:
+                #     loss_l1 = l1_per_pixel.mean()
+                # # ── end solid angle weighting ───────────────────────────────────
+
+                # lambda_l1 = self.conf.loss.lambda_l1
+
                 if getattr(self.conf.loss, 'use_solid_angle_loss', False):
                     H = rgb_gt.shape[1]
-                    v_coords = torch.arange(H, device=rgb_gt.device,
-                                            dtype=torch.float32)
-                    # sin(pi*v/H): 0 at poles, 1 at equator
-                    weights = torch.sin(torch.pi * v_coords / H)
-                    # reshape to (1,H,1,1) for broadcasting over batch,W,channels
-                    weights = weights.reshape(1, H, 1, 1)
-                    # normalize so total loss magnitude stays same as unweighted
+                    W = rgb_gt.shape[2]
+
+                    is_fisheye = (
+                        hasattr(gpu_batch, 'intrinsics_OpenCVFisheyeCameraModelParameters')
+                        and gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters is not None
+                    )
+                    is_erp = (
+                        hasattr(gpu_batch, 'intrinsics_EquirectangularCameraModelParameters')
+                        and gpu_batch.intrinsics_EquirectangularCameraModelParameters is not None
+                    )
+
+                    if is_fisheye:
+                        intr = gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters
+                        fx = float(intr['focal_length'][0])
+                        cx = float(intr['principal_point'][0])
+                        cy = float(intr['principal_point'][1])
+                        u_coords = torch.arange(W, device=rgb_gt.device, dtype=torch.float32)
+                        v_coords = torch.arange(H, device=rgb_gt.device, dtype=torch.float32)
+                        vv, uu = torch.meshgrid(v_coords, u_coords, indexing='ij')
+                        r = torch.sqrt((uu - cx) ** 2 + (vv - cy) ** 2)
+                        theta = r / fx
+                        weights = torch.sin(theta) / (theta + 1e-8)
+                        weights = weights.reshape(1, H, W, 1)
+
+                    elif is_erp:
+                        v_coords = torch.arange(H, device=rgb_gt.device, dtype=torch.float32)
+                        weights = torch.sin(torch.pi * v_coords / H)
+                        weights = weights.reshape(1, H, 1, 1)
+
+                    else:
+                        weights = torch.ones(1, 1, 1, 1,
+                                             device=rgb_gt.device,
+                                             dtype=torch.float32)
+
                     weights = weights / (weights.mean() + 1e-8)
                     loss_l1 = (l1_per_pixel * weights).mean()
+
                 else:
                     loss_l1 = l1_per_pixel.mean()
                 # ── end solid angle weighting ───────────────────────────────────
-
                 lambda_l1 = self.conf.loss.lambda_l1
+#============================================================================================================================
 
         # L2 loss
         loss_l2 = torch.zeros(1, device=self.device)
