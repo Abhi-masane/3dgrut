@@ -423,8 +423,11 @@ class Tracer:
             )
             return camera_model_parameters, pose_model.get_sensor_pose()
 
+#============================================================================================================================
+
+        # Thesis: ERP camera model for 3DGUT Unscented Transform rendering
         elif (K := gpu_batch.intrinsics_EquirectangularCameraModelParameters) is not None:
-            # Thesis: ERP camera model for 3DGUT Unscented Transform rendering.
+            
             #
             # The CUDA rendering kernel only supports PINHOLE and FISHEYE natively.
             # ERP is mapped to PINHOLE using the spherical focal length convention:
@@ -437,7 +440,7 @@ class Tracer:
             # approximation at other latitudes.
 
             # Note: a native ERP CUDA kernel would require modifying the C++ plugin.
-            # This approximation is consistent with FullCircle (CVPR 2024) approach.
+            # This approximation is according with FullCircle (CVPR 2024) approach.
 
             W = float(K["resolution"][0])
             H = float(K["resolution"][1])

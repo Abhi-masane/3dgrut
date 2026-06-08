@@ -120,8 +120,8 @@ class EquirectangularCameraModelParameters(CameraModelParameters):
     """Represents Equirectangular-specific camera model parameters
 
     Calculations:
-    Theta = (u / W * 2*pi) - pi --> -pi to pi  -- azimuth
-    Phi = (v / H * pi) - (pi/2) --> -pi/2 to pi/2 -- 
+    Theta = (u / W * 2*pi) - pi --> -pi to pi  -- longitude
+    Phi = (v / H * pi) - (pi/2) --> -pi/2 to pi/2 -- latitude
     
     ray :
     x = cos(phi) * sin(theta) -- right
