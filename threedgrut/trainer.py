@@ -524,13 +524,25 @@ class Trainer3DGRUT:
                         vv, uu = torch.meshgrid(v_coords, u_coords, indexing='ij')
                         r = torch.sqrt((uu - cx) ** 2 + (vv - cy) ** 2)
                         theta = r / fx
-                        weights = torch.sin(theta) / (theta + 1e-8)
-                        weights = weights.reshape(1, H, W, 1)
+                        # weights = torch.sin(theta) / (theta + 1e-8)
+                        # weights = weights.reshape(1, H, W, 1)
+                        solid_w = torch.sin(theta) / (theta + 1e-8)
+                        solid_w = solid_w.reshape(1, H, W, 1)
+                        anneal_end = getattr(self.conf.loss, 'solid_angle_anneal_end', 0.5)
+                        progress = min(1.0, self.global_step / max(1, self.n_iterations))
+                        alpha = max(0.0, 1.0 - progress / anneal_end)
+                        weights = alpha * solid_w + (1.0 - alpha) * torch.ones_like(solid_w)
 
                     elif is_erp:
                         v_coords = torch.arange(H, device=rgb_gt.device, dtype=torch.float32)
-                        weights = torch.sin(torch.pi * v_coords / H)
-                        weights = weights.reshape(1, H, 1, 1)
+                        # weights = torch.sin(torch.pi * v_coords / H)
+                        # weights = weights.reshape(1, H, 1, 1)
+                        solid_w = torch.sin(torch.pi * v_coords / H)
+                        solid_w = solid_w.reshape(1, H, 1, 1)
+                        anneal_end = getattr(self.conf.loss, 'solid_angle_anneal_end', 0.5)
+                        progress = min(1.0, self.global_step / max(1, self.n_iterations))
+                        alpha = max(0.0, 1.0 - progress / anneal_end)
+                        weights = alpha * solid_w + (1.0 - alpha) * torch.ones_like(solid_w)
 
                     else:
                         weights = torch.ones(1, 1, 1, 1,
