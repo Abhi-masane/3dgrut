@@ -17,6 +17,7 @@ import subprocess
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+import torch
 
 from threedgrut.utils.logger import logger
 from threedgrut.utils.timer import timing_options
@@ -35,8 +36,23 @@ def get_git_revision_hash() -> str:
         return "Unknown"
 
 
+# @hydra.main(config_path="configs", version_base=None)
+# def main(conf: DictConfig) -> None:
+#     logger.info(f"Git hash: {get_git_revision_hash()}")
+#     logger.info(f"Compiling native code..")
+#     from threedgrut.trainer import Trainer3DGRUT
+
 @hydra.main(config_path="configs", version_base=None)
 def main(conf: DictConfig) -> None:
+    seed = conf.get("seed", None)
+    if seed is not None:
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        logger.info(f"Seeded run with seed={seed}")
     logger.info(f"Git hash: {get_git_revision_hash()}")
     logger.info(f"Compiling native code..")
     from threedgrut.trainer import Trainer3DGRUT

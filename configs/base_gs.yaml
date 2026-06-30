@@ -9,6 +9,7 @@ experiment_name: ""
 resume: ""
 out_dir: "./runs"
 n_iterations: 30000
+seed: null
 with_gui: false
 with_viser_gui: false
 gui_update_from_device: true
@@ -109,7 +110,6 @@ loss:
   use_l1: true
   lambda_l1: 0.8
   use_solid_angle_loss: false # V3 thesis: sin(pi*v/H) ERP solid angle weighting. false=V1/V2, true=V3/V4
-  solid_angle_anneal_end: 0.5  # V3 thesis: fraction of training where annealing ends (0.5=50%)
 
   use_l2: false
   lambda_l2: 1.0

@@ -196,7 +196,7 @@ class Renderer:
         if self.compute_extra_metrics:
             criterions |= {
                 "ssim": StructuralSimilarityIndexMeasure(data_range=1.0).to("cuda"),
-                "lpips": LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).to("cuda"),
+                "lpips": LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).to("cpu"),
             }
 
         output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "renders")
@@ -278,8 +278,8 @@ class Renderer:
             )
             lpips.append(
                 criterions["lpips"](
-                    pred_rgb_full.clip(0, 1).permute(0, 3, 1, 2),
-                    rgb_gt_full.permute(0, 3, 1, 2),
+                    pred_rgb_full.clip(0, 1).permute(0, 3, 1, 2).cpu(),
+                    rgb_gt_full.permute(0, 3, 1, 2).cpu(),
                 ).item()
             )
 
@@ -294,8 +294,8 @@ class Renderer:
             )
             cc_lpips.append(
                 criterions["lpips"](
-                    pred_rgb_cc.clip(0, 1).permute(0, 3, 1, 2),
-                    rgb_gt_full.permute(0, 3, 1, 2),
+                    pred_rgb_cc.clip(0, 1).permute(0, 3, 1, 2).cpu(),
+                    rgb_gt_full.permute(0, 3, 1, 2).cpu(),
                 ).item()
             )
 

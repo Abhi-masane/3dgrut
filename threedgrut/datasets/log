@@ -1,0 +1,366 @@
+    1  ls
+    2  sudo apt update && sudo apt upgrade
+    3  passwd
+    4  pwd
+    5  mkdir thesis
+    6  ls
+    7  sudo apt install build-essential git
+    8  nvidia-smi
+    9  docker --version
+   10  sudo apt-get update
+   11  sudo apt-get install -y ca-certificates curl gnupg
+   12  sudo install -m 0755 -d /etc/apt/keyrings
+   13  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+   14  sudo chmod a+r /etc/apt/keyrings/docker.gpg
+   15  echo   "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+   16    $(lsb_release -cs) stable" |   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+   17  sudo apt-get update
+   18  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+   19  docker --version
+   20  docker-copose --version
+   21  docker-compose --version
+   22  wsl --shutdown
+   23  docker --version
+   24  docker compose version
+   25  sudo apt update
+   26  sudo apt install docker.io docker-compose-v2
+   27  sudo usermod -aG docker $USER
+   28  docker run hello-world
+   29  docker run --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi
+   30  ls
+   31  cd thesis/
+   32  ls
+   33  explorer.exe .
+   34  sudo apt update
+   35  sudo apt install python3 python3-venv python3-pip
+   36  python3 -m venv 3dgut
+   37  cd ~
+   38  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+   39  bash Miniconda3-latest-Linux-x86_64.sh
+   40  source ~/.bashrc
+   41  conda activate 3dgut
+   42  deactivate
+   43  rm -rf 3dgut
+   44  touch environment.yml
+   45  gedit environment.yml 
+   46  sudo snap install gedit  # version 48.1
+   47  sudo apt install gedit  # version 48.1
+   48  gedit environment.yml
+   49  conda activate 3dgrut
+   50  conda activate 3dgut
+   51  conda create -n 3dgrut python=3.11 -y
+   52  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+   53  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+   54  conda create -n 3dgrut python=3.11 -y
+   55  conda rm 3dgrut
+   56  conda -rm 3dgrut
+   57  conda -n 3dgrut
+   58  conda remove -n 3dgrut
+   59  conda env create -f environment.yml
+   60  gedit environment.yml 
+   61  conda env create -f environment.yml
+   62  gedit environment.yml 
+   63  conda activate 3dgrut
+   64  pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.0_cu118.html
+   65  conda env remove -n 3dgrut
+   66  deactivate
+   67  exit
+   68  conda env remove -n 3dgrut
+   69  explorer.exe .
+   70  conda activate 3dgrut
+   71  conda create -n 3dgrut
+   72  conda activate 3dgrut
+   73  cd 3dgrut && bash install_env.sh 3dgrut
+   74  which gcc-11
+   75  sudo apt-get update && sudo apt-get install -y gcc-11 g++-11
+   76  bash install_env.sh 3dgrut WITH_GCC11
+   77  conda activate 3dgrut
+   78  CC=gcc-11 CXX=g++-11 python render.py   --checkpoint /home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_meetingroom/meetingroom_v1-0305_153353/ours_30000/ckpt_30000.pt   --path /home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1   --out-dir /home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_meetingroom_eval2   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_eval2.log
+   79  conda activate 3dgrut
+   80  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small   n_iterations=7000   dataset.downsample_factor=4   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_small.log
+   81  exit
+   82  cd
+   83  conda activate 3dgrut
+   84  cd ~/thesis/my3dscene/data/datasets/fiord
+   85  mkdir -p meetingroom_v1_small/images_4/cam1
+   86  mkdir -p meetingroom_v1_small/images_4/cam2
+   87  python3 << 'EOF'
+   88  from PIL import Image
+   89  from pathlib import Path
+   90  dst = Path("meetingroom_v1_small/images_4")
+   91  small_images = list(Path("meetingroom_v1_small/images").rglob("*.png"))
+   92  print(f"Resizing {len(small_images)} images...")
+   93  for img_path in small_images:
+   94      rel = img_path.relative_to(Path("meetingroom_v1_small/images"))
+   95      out_path = dst / rel
+   96      out_path.parent.mkdir(parents=True, exist_ok=True)
+   97      if out_path.exists():
+   98          continue
+   99      img = Image.open(img_path)
+  100      w, h = img.size
+  101      img.resize((w//4, h//4), Image.LANCZOS).save(out_path)
+  102      img.close()
+  103      print(f"  {rel} → {w//4}x{h//4}")
+  104  print("Done")
+  105  EOF
+  106  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small2   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_small2.log
+  107  cd
+  108  conda activate 3dgrut
+  109  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
+  110  disown
+  111  echo "Training running as PID $!"
+  112  conda activate 3dgrut
+  113  cd
+  114  wsl --shutdown
+  115  exit
+  116  cd
+  117  nvidia-smi
+  118  # Kill the unattended upgrades that's hogging resources
+  119  sudo pkill -f unattended-upgrade
+  120  # Verify GPU is free
+  121  nvidia-smi | grep -E "MiB|%"
+  122  # Restart training
+  123  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
+  124  disown
+  125  echo "PID: $!"
+  126  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
+  127  ps aux | grep train | grep -v grep
+  128  conda activate 3dgrut
+  129  # Kill the unattended upgrades that's hogging resources
+  130  sudo pkill -f unattended-upgrade
+  131  # Verify GPU is free
+  132  nvidia-smi | grep -E "MiB|%"
+  133  # Restart training
+  134  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
+  135  disown
+  136  echo "PID: $!"
+  137  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
+  138  ps aux | grep train | grep -v grep
+  139  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
+  140  ps aux | grep train | grep -v grep
+  141  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
+  142  ps aux | grep train | grep -v grep
+  143  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
+  144  ps aux | grep train | grep -v grep
+  145  cat > ~/thesis/my3dscene/logs/phase1_v1_metrics.json << 'EOF'
+  146  {
+  147    "variant": "V1",
+  148    "description": "Perspective pinhole baseline — FIORD MeetingRoom undistorted images",
+  149    "dataset": "FIORD MeetingRoom_In — meetingroom_v1_small (29 images, every 7th)",
+  150    "resolution": "images_4 (734x734, quarter of 2937x2937)",
+  151    "training_steps": 7000,
+  152    "num_workers": 4,
+  153    "config": "colmap_3dgut + downsample_factor=4",
+  154    "metrics": {
+  155      "mean_psnr": 20.764,
+  156      "mean_ssim": 0.705,
+  157      "mean_lpips": 0.444,
+  158      "mean_cc_psnr": 20.419,
+  159      "mean_cc_ssim": 0.687,
+  160      "mean_cc_lpips": 0.448
+  161    },
+  162    "thesis_role": "Ablation V1: perspective pinhole upper-bound reference. Full run on RTX 5090: meetingroom_v1 full dataset, downsample_factor=1, n_iterations=30000"
+  163  }
+  164  EOF
+  165  cd ~/thesis/my3dscene
+  166  git add logs/
+  167  git commit -m "phase1 V1 complete: PSNR=20.764 SSIM=0.705 LPIPS=0.444 (prototype 29img 7Kiter 734px)"
+  168  # Fix git identity
+  169  git config --global user.email "abhilash.masane.de@gmail.com"
+  170  git config --global user.name "Abhilash Masane"
+  171  # Fix logs being ignored — force add
+  172  git add -f logs/
+  173  git commit -m "phase1 V1 complete: PSNR=20.764 SSIM=0.705 LPIPS=0.444 (prototype 29img 7Kiter 734px)"
+  174  conda activate 3dgrut
+  175  tensorboard --logdir ~/thesis/my3dscene/outputs/phase1_v1_small3 --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &
+  176  disown
+  177  conda activate 3dgrut
+  178  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_view   n_iterations=0   dataset.downsample_factor=4   num_workers=4   with_viser_gui=true   resume=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3/meetingroom_v1_small-0405_151320/ckpt_last.pt   > ~/thesis/my3dscene/logs/phase1_viser.log 2>&1 &
+  179  # Kill tensorboard
+  180  pkill -f tensorboard
+  181  # Kill viser
+  182  pkill -f "with_viser_gui"
+  183  # Verify everything is stopped
+  184  ps aux | grep -E "tensorboard|viser|train.py" | grep -v grep
+  185  exit
+  186  cd
+  187  ls ~/thesis/my3dscene/data/datasets/fiord/meetingroom_equirect/images_raw/ | wc -l
+  188  conda activate 3dgrut
+  189  cd ~/thesis/my3dscene/data/datasets/fiord
+  190  mkdir -p meetingroom_v2_small/images
+  191  mkdir -p meetingroom_v2_small/sparse/0
+  192  # Subsample equirect images — same every-7th strategy as V1
+  193  python3 << 'EOF'
+import struct, shutil, os
+from pathlib import Path
+
+SRC_IMGS = Path("meetingroom_equirect/images_raw")
+DST      = Path("meetingroom_v2_small")
+
+# Get all stitched images sorted
+imgs = sorted(SRC_IMGS.glob("*.png"))
+print(f"Total equirect images: {len(imgs)}")
+
+# Take every 7th — same count as V1 small dataset
+selected = imgs[::7]
+print(f"Selected: {len(selected)} images (every 7th)")
+
+# Symlink selected images
+img_dst = DST / "images"
+img_dst.mkdir(parents=True, exist_ok=True)
+
+for img in selected:
+    dst = img_dst / img.name
+    if not dst.exists():
+        os.symlink(img.resolve(), dst)
+    print(f"  {img.name}")
+
+print(f"\nSymlinked {len(selected)} images to {img_dst}")
+EOF
+
+  194  cd ~/thesis/my3dscene/data/datasets/fiord
+  195  python3 << 'EOF'
+"""
+Creates COLMAP sparse model for V2 equirectangular dataset.
+Reuses camera poses from fisheye model — same physical positions,
+different camera model (EQUIRECTANGULAR instead of OPENCV_FISHEYE).
+
+COLMAP camera model for equirectangular:
+  model_id = 7 (EQUIRECTANGULAR in newer COLMAP)
+  But 3DGUT does not support EQUIRECTANGULAR natively.
+  
+Instead we use a workaround: store as PINHOLE with very wide FOV,
+and let 3DGUT handle it via its equirectangular dataset loader.
+Actually the cleanest approach: check what 3DGUT supports for ERP.
+"""
+import struct
+from pathlib import Path
+
+# Read fisheye images.bin to get pose for each fisheye frame
+def read_images_bin(path):
+    images = {}
+    with open(path, 'rb') as f:
+        n = struct.unpack('<Q', f.read(8))[0]
+        for _ in range(n):
+            img_id = struct.unpack('<I', f.read(4))[0]
+            qvec   = struct.unpack('<4d', f.read(32))
+            tvec   = struct.unpack('<3d', f.read(24))
+            cam_id = struct.unpack('<I', f.read(4))[0]
+            name   = b''
+            while True:
+                c = f.read(1)
+                if c == b'\x00': break
+                name += c
+            name = name.decode('utf-8')
+            n2d  = struct.unpack('<Q', f.read(8))[0]
+            pts  = struct.unpack(f'<{3*n2d}d', f.read(24*n2d)) if n2d else ()
+            images[img_id] = dict(qvec=qvec, tvec=tvec, cam_id=cam_id,
+                                  name=name, n2d=n2d, pts=pts)
+    return images
+
+fisheye_images = read_images_bin('meetingroom/model/images.bin')
+
+# Build lookup: frame_number -> pose from cam1 fisheye images
+# fisheye filename: IMG_20241120_000613_00_729_fisheye1.png -> frame number = 729
+frame_to_pose = {}
+for img_id, im in fisheye_images.items():
+    if 'cam1' in im['name'] and 'fisheye1' in im['name']:
+        # Extract frame number from filename
+        parts = Path(im['name']).stem.split('_')
+        frame_num = parts[4]  # e.g. '729'
+        frame_to_pose[frame_num] = im
+
+print(f"Found {len(frame_to_pose)} cam1 poses in fisheye model")
+
+# Check which of our 16 selected frames have poses
+selected = sorted(Path('meetingroom_v2_small/images').glob('*.png'))
+print(f"\nChecking {len(selected)} selected equirect frames:")
+matched = []
+for img_path in selected:
+    # frame_729.png -> '729'
+    frame_num = img_path.stem.split('_')[1]
+    if frame_num in frame_to_pose:
+        print(f"  {img_path.name} -> pose found (cam_id={frame_to_pose[frame_num]['cam_id']})")
+        matched.append((img_path, frame_num, frame_to_pose[frame_num]))
+    else:
+        print(f"  {img_path.name} -> NO POSE FOUND")
+
+print(f"\nMatched: {len(matched)}/{len(selected)} frames")
+EOF
+
+  196  python3 ~/thesis/my3dscene/scripts/create_v2_colmap.py
+  197  python3 ~/thesis/my3dscene/scripts/resize_images.py
+  198  touch ~/thesis/my3dscene/scripts/create_v2_colmap.py
+  199  gedit ~/thesis/my3dscene/scripts/create_v2_colmap.py
+  200  touch ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py
+  201  explorer.exe .
+  202  gedit ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py
+  203  python3 ~/thesis/my3dscene/scripts/create_v2_colmap.py
+  204  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
+  205  gedit ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
+  206  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
+  207  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py 
+  208  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v2_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase2_v2_small   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase2_v2_training.log 2>&1 &
+  209  disown
+  210  echo "V2 training started"
+  211  tail -5 ~/thesis/my3dscene/logs/phase2_v2_training.log
+  212  tail -20 ~/thesis/my3dscene/logs/phase2_v2_training.log
+  213  cat > ~/thesis/my3dscene/logs/phase2_v2_metrics.json << 'EOF'
+{
+  "variant": "V2",
+  "description": "Equirectangular baseline — no distortion correction",
+  "dataset": "FIORD MeetingRoom_In — meetingroom_v2_small (16 images, every 7th)",
+  "resolution": "images_4 (512x256, quarter of 2048x1024)",
+  "training_steps": 7000,
+  "config": "colmap_3dgut + downsample_factor=4",
+  "metrics": {
+    "mean_psnr": 8.960,
+    "mean_ssim": 0.331,
+    "mean_lpips": 0.535
+  },
+  "thesis_role": "Ablation V2: equirectangular without correction. Drop from V1 PSNR=20.764 to 8.960 proves polar distortion problem. V3 solid angle loss should recover this."
+}
+EOF
+
+  214  cd ~/thesis/my3dscene
+  215  git add -f logs/
+  216  git commit -m "V2 complete: equirectangular baseline PSNR=8.960 SSIM=0.331 LPIPS=0.535"
+  217  grep -n "PINHOLE\|OPENCV\|camera_model\|intr.model"   ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py | head -30
+  218  cat ~/thesis/3dgrut/threedgrut/datasets/camera_models.py | head -80
+  219  # See all camera model classes defined
+  220  grep -n "class.*Camera\|def.*ray\|def.*unproject\|def.*pixel_to"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  221  # See the full block where camera models are handled in dataset_colmap.py
+  222  sed -n '230,270p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
+  223  # See what the fisheye model class looks like — we model ERP similarly
+  224  grep -n "class.*Fisheye\|class.*OpenCV"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  225  # See create_pinhole_camera and create_fisheye_camera functions
+  226  grep -n "def create_pinhole\|def create_fisheye\|def image_points_to_camera_rays"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  227  # See the full fisheye camera model class
+  228  sed -n '89,155p' ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  229  # See image_points_to_camera_rays function — this is the key function
+  230  sed -n '151,230p' ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  231  grep -n "def create_fisheye\|def create_pinhole"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  232  # See those functions fully
+  233  grep -n "def create_" ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  234  # Also check what's imported in dataset_colmap.py from camera_models
+  235  sed -n '28,35p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
+  236  # Check full camera_models.py line count
+  237  wc -l ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  238  grep -n "def create_fisheye\|def create_pinhole"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  239  # See those functions fully
+  240  grep -n "def create_" ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  241  # Also check what's imported in dataset_colmap.py from camera_models
+  242  sed -n '28,35p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
+  243  # Check full camera_models.py line count
+  244  wc -l ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
+  245  cd ..
+  246  cd 3dggrut
+  247  cd 3dgrut/
+  248  ls
+  249  cd threedgrut
+  250  ls
+  251  cd datasets/
+  252  ls
+  253  gedit camera_models.py
+  254  history
+  255  history | tee log
