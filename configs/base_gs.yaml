@@ -8,7 +8,7 @@ path: ???
 experiment_name: ""
 resume: ""
 out_dir: "./runs"
-n_iterations: 30000
+n_iterations: 30000 
 seed: null
 with_gui: false
 with_viser_gui: false
@@ -109,13 +109,13 @@ scheduler:
 loss:
   use_l1: true
   lambda_l1: 0.8
-  use_solid_angle_loss: false # V3 thesis: sin(pi*v/H) ERP solid angle weighting. false=V1/V2, true=V3/V4
+  use_solid_angle_loss: false # V3 thesis:  solid angle weighting. false=V1/V2, true=V3/V4
 
   use_l2: false
   lambda_l2: 1.0
 
-  use_ssim: true
-  lambda_ssim: 0.2
+  use_ssim: true # changed from true to false for testing --reverted back the changes to original
+  lambda_ssim: 0.2 # changed from 0.2 to 0.0 for testing --reverted back changes to original
 
   use_opacity: false
   lambda_opacity: 0.0
