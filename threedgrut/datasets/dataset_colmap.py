@@ -214,17 +214,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
 
             max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0 
             nvidia_max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
-
-            # ------------------------------------------------------------------
-            # EXPERIMENT:
-            # Override NVIDIA's rectangular-corner-derived fisheye FoV.
-            #
-            # max_angle is the angular radius / HALF field-of-view.
-            #
-            # 95 degrees => approximately 190 degree full fisheye FoV.
-            # ------------------------------------------------------------------
-
-            #max_angle = np.deg2rad(85.0) 
+   
+            #max_angle = np.deg2rad(85.0) # Override to 85 degrees - experimenting with ignoring the outer problematic ring
 
             print(
             "[FISHEYE FOV BASELINE]"
