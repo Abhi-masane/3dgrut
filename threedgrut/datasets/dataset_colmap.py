@@ -212,7 +212,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             fov_angle_x = 2.0 * max_radius_pixels / focal_length[0]
             fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
 
-            #max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
+            max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0 
             nvidia_max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
 
             # ------------------------------------------------------------------
@@ -224,13 +224,13 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             # 95 degrees => approximately 190 degree full fisheye FoV.
             # ------------------------------------------------------------------
 
-            max_angle = np.deg2rad(85.0)
+            #max_angle = np.deg2rad(85.0) 
 
             print(
-                "[FISHEYE FOV EXPERIMENT]"
-                f" NVIDIA={np.rad2deg(nvidia_max_angle):.2f} deg half-FoV,"
-                f" override={np.rad2deg(max_angle):.2f} deg half-FoV,"
-                f" full FoV={2.0 * np.rad2deg(max_angle):.2f} deg"
+            "[FISHEYE FOV BASELINE]"
+            f" NVIDIA={np.rad2deg(nvidia_max_angle):.2f} deg half-FoV,"
+            f" active={np.rad2deg(max_angle):.2f} deg half-FoV,"
+            f" full FoV={2.0 * np.rad2deg(max_angle):.2f} deg"
             )
 
             print("\n" + "=" * 80)
