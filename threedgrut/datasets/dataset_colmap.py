@@ -211,7 +211,27 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             max_radius_pixels = compute_max_radius(resolution.astype(np.float64), principal_point)
             fov_angle_x = 2.0 * max_radius_pixels / focal_length[0]
             fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
-            max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
+
+            #max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
+            nvidia_max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
+
+            # ------------------------------------------------------------------
+            # EXPERIMENT:
+            # Override NVIDIA's rectangular-corner-derived fisheye FoV.
+            #
+            # max_angle is the angular radius / HALF field-of-view.
+            #
+            # 95 degrees => approximately 190 degree full fisheye FoV.
+            # ------------------------------------------------------------------
+
+            max_angle = np.deg2rad(95.0)
+
+            print(
+                "[FISHEYE FOV EXPERIMENT]"
+                f" NVIDIA={np.rad2deg(nvidia_max_angle):.2f} deg half-FoV,"
+                f" override={np.rad2deg(max_angle):.2f} deg half-FoV,"
+                f" full FoV={2.0 * np.rad2deg(max_angle):.2f} deg"
+            )
 
             print("\n" + "=" * 80)
             print("[3DGRUT FISHEYE CAMERA DEBUG]")
