@@ -224,7 +224,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             # 95 degrees => approximately 190 degree full fisheye FoV.
             # ------------------------------------------------------------------
 
-            max_angle = np.deg2rad(90.0)
+            max_angle = np.deg2rad(85.0)
 
             print(
                 "[FISHEYE FOV EXPERIMENT]"
