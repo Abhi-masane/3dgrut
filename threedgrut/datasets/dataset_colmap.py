@@ -197,7 +197,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
                 type(params).__name__,
                 pixel_coords,
             )
-
+        #========================================testing=========================================================
         def create_fisheye_camera(params, w, h):
             # Generate UV coordinates
             u = np.tile(np.arange(w), h)
@@ -213,6 +213,56 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
             max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
 
+            print("\n" + "=" * 80)
+            print("[3DGRUT FISHEYE CAMERA DEBUG]")
+
+            print("resolution:", resolution)
+            print("width:", w)
+            print("height:", h)
+
+            print("fx:", focal_length[0])
+            print("fy:", focal_length[1])
+
+            print("cx:", principal_point[0])
+            print("cy:", principal_point[1])
+
+            print("distortion k1 k2 k3 k4:", radial_coeffs)
+
+            print(
+                "principal-point offset from image center:",
+                principal_point[0] - w / 2.0,
+                principal_point[1] - h / 2.0,
+            )
+
+            print("radius left:", principal_point[0])
+            print("radius right:", w - principal_point[0])
+            print("radius top:", principal_point[1])
+            print("radius bottom:", h - principal_point[1])
+
+            print("NVIDIA max_radius_pixels:", max_radius_pixels)
+
+            print(
+                "fov_angle_x full deg:",
+                np.rad2deg(fov_angle_x),
+            )
+
+            print(
+                "fov_angle_y full deg:",
+                np.rad2deg(fov_angle_y),
+            )
+
+            print(
+                "max_angle half-FoV deg:",
+                np.rad2deg(max_angle),
+            )
+
+            print(
+                "implied full FoV deg:",
+                2.0 * np.rad2deg(max_angle),
+            )
+
+            print("=" * 80 + "\n")
+#==========================================================================================================================            
             params = OpenCVFisheyeCameraModelParameters(
                 principal_point=principal_point,
                 focal_length=focal_length,
