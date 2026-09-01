@@ -31,6 +31,35 @@ from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import create_summary_writer
 from threedgrut.utils.render import apply_post_processing
 
+def compute_solid_angle_weights(gpu_batch, H, W, device):
+    """Same weight formula used in trainer.py's get_losses(), kept
+    identical so WS-PSNR evaluates against the same metric the
+    solid-angle-weighted loss actually optimizes for."""
+    is_fisheye = (
+        hasattr(gpu_batch, 'intrinsics_OpenCVFisheyeCameraModelParameters')
+        and gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters is not None
+    )
+    is_erp = (
+        hasattr(gpu_batch, 'intrinsics_EquirectangularCameraModelParameters')
+        and gpu_batch.intrinsics_EquirectangularCameraModelParameters is not None
+    )
+    if is_fisheye:
+        intr = gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters
+        fx = float(intr['focal_length'][0])
+        cx = float(intr['principal_point'][0])
+        cy = float(intr['principal_point'][1])
+        u = torch.arange(W, device=device, dtype=torch.float32)
+        v = torch.arange(H, device=device, dtype=torch.float32)
+        vv, uu = torch.meshgrid(v, u, indexing='ij')
+        r = torch.sqrt((uu - cx) ** 2 + (vv - cy) ** 2)
+        theta = r / fx
+        weights = torch.sinc(theta / torch.pi).view(1, H, W, 1)
+    elif is_erp:
+        v = torch.arange(H, device=device, dtype=torch.float32)
+        weights = torch.sin(torch.pi * (v + 0.5) / H).view(1, H, 1, 1)
+    else:
+        weights = torch.ones(1, H, W, 1, device=device, dtype=torch.float32)
+    return weights
 
 class Renderer:
     def __init__(
@@ -212,6 +241,7 @@ class Renderer:
         cc_psnr = []
         cc_ssim = []
         cc_lpips = []
+        ws_psnr = []
         inference_time = []
 
         best_psnr = -1.0
@@ -298,6 +328,16 @@ class Renderer:
                     rgb_gt_full.permute(0, 3, 1, 2).cpu(),
                 ).item()
             )
+            # WS-PSNR: same weighting used by the solid-angle-weighted loss,
+            # applied here so the evaluation metric can actually detect the
+            # effect that loss is designed to produce.
+            _H, _W = rgb_gt_full.shape[1], rgb_gt_full.shape[2]
+            _weights = compute_solid_angle_weights(gpu_batch, _H, _W, pred_rgb_full.device)
+            _err2 = (pred_rgb_full - rgb_gt_full) ** 2
+            _denom = _weights.expand_as(_err2).sum().clamp_min(1e-8)
+            _weighted_mse = (_weights * _err2).sum() / _denom
+            _ws_psnr_val = 10.0 * torch.log10(1.0 / _weighted_mse.clamp_min(1e-12))
+            ws_psnr.append(_ws_psnr_val.item())
 
             # Record the time
             inference_time.append(outputs["frame_time_ms"])
@@ -312,6 +352,7 @@ class Renderer:
         mean_cc_psnr = np.mean(cc_psnr)
         mean_cc_ssim = np.mean(cc_ssim)
         mean_cc_lpips = np.mean(cc_lpips)
+        mean_ws_psnr = np.mean(ws_psnr)
         std_psnr = np.std(psnr)
         mean_inference_time = np.mean(inference_time)
 
@@ -322,6 +363,7 @@ class Renderer:
             mean_cc_psnr=mean_cc_psnr,
             mean_cc_ssim=mean_cc_ssim,
             mean_cc_lpips=mean_cc_lpips,
+            mean_ws_psnr=mean_ws_psnr,
             std_psnr=std_psnr,
         )
 
@@ -336,6 +378,7 @@ class Renderer:
             mean_cc_psnr=float(mean_cc_psnr),
             mean_cc_ssim=float(mean_cc_ssim),
             mean_cc_lpips=float(mean_cc_lpips),
+            mean_ws_psnr=float(mean_ws_psnr),
         )
         metrics_path = os.path.join(self.out_dir, "metrics.json")
         with open(metrics_path, "w") as f:
@@ -351,6 +394,7 @@ class Renderer:
             self.writer.add_scalar("cc_psnr/test", mean_cc_psnr, self.global_step)
             self.writer.add_scalar("cc_ssim/test", mean_cc_ssim, self.global_step)
             self.writer.add_scalar("cc_lpips/test", mean_cc_lpips, self.global_step)
+            self.writer.add_scalar("ws_psnr/test", mean_ws_psnr, self.global_step)
             self.writer.add_scalar("time/inference/test", mean_inference_time, self.global_step)
 
             if best_psnr_img is not None:

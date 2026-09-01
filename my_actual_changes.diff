@@ -1,0 +1,1001 @@
+diff --git a/.gitignore b/.gitignore
+index b6d7f80..8dab68d 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -37,3 +37,5 @@ playground/assets/
+ 
+ assets/nvidia-hq.gif
+ assets/playground_glass.gif
++*.Zone.Identifier
++**/*.Zone.Identifier
+diff --git a/configs/base_gs.yaml b/configs/base_gs.yaml
+index 2b9e3f2..0778b62 100644
+--- a/configs/base_gs.yaml
++++ b/configs/base_gs.yaml
+@@ -8,7 +8,8 @@ path: ???
+ experiment_name: ""
+ resume: ""
+ out_dir: "./runs"
+-n_iterations: 30000
++n_iterations: 30000 
++seed: null
+ with_gui: false
+ with_viser_gui: false
+ gui_update_from_device: true
+@@ -108,12 +109,13 @@ scheduler:
+ loss:
+   use_l1: true
+   lambda_l1: 0.8
+-  
++  use_solid_angle_loss: false # V3 thesis:  solid angle weighting. false=V1/V2, true=V3/V4
++
+   use_l2: false
+   lambda_l2: 1.0
+ 
+-  use_ssim: true
+-  lambda_ssim: 0.2
++  use_ssim: true # changed from true to false for testing --reverted back the changes to original
++  lambda_ssim: 0.2 # changed from 0.2 to 0.0 for testing --reverted back changes to original
+ 
+   use_opacity: false
+   lambda_opacity: 0.0
+diff --git a/install_env.sh b/install_env.sh
+old mode 100755
+new mode 100644
+diff --git a/setup.py b/setup.py
+index 7caa085..fb09c11 100644
+--- a/setup.py
++++ b/setup.py
+@@ -26,7 +26,7 @@ setup(
+     long_description_content_type="text/markdown",
+     py_modules=["threedgrut", "threedgrt_tracer", "threedgut_tracer", "playground"],
+     packages=find_packages(where="libs"),
+-    python_requires=">=3.11",
++    python_requires=">=3.10",
+     install_requires=[],
+     classifiers=["Operating System :: OS Independent"],
+ )
+diff --git a/threedgrut/datasets/camera_models.py b/threedgrut/datasets/camera_models.py
+index 6feb3d5..8897a0d 100644
+--- a/threedgrut/datasets/camera_models.py
++++ b/threedgrut/datasets/camera_models.py
+@@ -42,7 +42,7 @@ class CameraModelParameters:
+     resolution: np.ndarray  #: Width and height of the image in pixels (int64, [2,])
+     shutter_type: ShutterType  #: Shutter type of the camera's imaging sensor
+ 
+-    def __post_init__(self):
++    def __post_init__(self):    
+         # Sanity checks
+         assert self.resolution.shape == (2,)
+         assert self.resolution.dtype == np.dtype("int64")
+@@ -112,6 +112,27 @@ class OpenCVFisheyeCameraModelParameters(CameraModelParameters, dataclasses_json
+         assert self.radial_coeffs.dtype == np.dtype("float32")
+         assert self.max_angle > 0.0
+ 
++#============================================================================================
++#====Equirectangular camera model parameters====#
++
++
++class EquirectangularCameraModelParameters(CameraModelParameters):
++    """Represents Equirectangular-specific camera model parameters
++
++    Calculations:
++    Theta = (u / W * 2*pi) - pi --> -pi to pi  -- longitude
++    Phi = (v / H * pi) - (pi/2) --> -pi/2 to pi/2 -- latitude
++    
++    ray :
++    x = cos(phi) * sin(theta) -- right
++    y = sin(phi)              -- up 
++    z = cos(phi) * cos(theta) -- forward
++
++
++    """
++    pass
++
++##============================================================================================
+ 
+ def _eval_poly_horner(poly_coefficients: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+     """Evaluates a polynomial y=f(x) (given by poly_coefficients) at points x using
+@@ -161,6 +182,29 @@ def image_points_to_camera_rays(
+ 
+     dtype: torch.dtype = torch.float32
+ 
++#============================================================================================================================
++
++    if isinstance(camera_model_parameters, EquirectangularCameraModelParameters):
++
++        W = int(camera_model_parameters.resolution[0])
++        H = int(camera_model_parameters.resolution[1])
++
++        u = image_points[:, 0].to(torch.float32).to(device)
++        v = image_points[:, 1].to(torch.float32).to(device)
++
++        theta = (u/W * 2 * torch.pi) - torch.pi
++        phi = torch.pi/2 - (v/H * torch.pi)
++
++        # Convention changed from  ray_y = -torch.sin(phi) (right-up-front) --> ray_y = torch.sin(phi) (right-down-front)
++        ray_x = torch.cos(phi) * torch.sin(theta)
++        ray_y = torch.sin(phi)
++        ray_z = torch.cos(phi) * torch.cos(theta)
++
++        cam_rays = torch.stack((ray_x, ray_y, ray_z), dim=1)
++        return cam_rays
++
++
++#============================================================================================================================
+     principal_point = torch.tensor(camera_model_parameters.principal_point, dtype=dtype, device=device)
+     focal_length = torch.tensor(camera_model_parameters.focal_length, dtype=dtype, device=device)
+     resolution = torch.tensor(camera_model_parameters.resolution.astype(np.int32), device=device)
+diff --git a/threedgrut/datasets/dataset_colmap.py b/threedgrut/datasets/dataset_colmap.py
+index d320f0a..14db1b3 100644
+--- a/threedgrut/datasets/dataset_colmap.py
++++ b/threedgrut/datasets/dataset_colmap.py
+@@ -26,6 +26,7 @@ from torch.utils.data import Dataset
+ from threedgrut.utils.logger import logger
+ 
+ from .camera_models import (
++    EquirectangularCameraModelParameters, # Thesis: newly added for equirectangular support
+     OpenCVFisheyeCameraModelParameters,
+     OpenCVPinholeCameraModelParameters,
+     ShutterType,
+@@ -144,7 +145,35 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+ 
+     def _store_camera_params_cpu(self):
+         """Store camera parameters on CPU for multiprocessing compatibility."""
++        
++#============================================================================================        
++        def create_equirectangular_camera(w, h): #Thesis: Added support for equirectangular cameras by generating rays based on pixel coordinates and camera model parameters
++            # Generating UV coordinates
++            u = np.tile(np.arange(w), h)
++            v = np.arange(h).repeat(w)
++            out_shape = (1, h, w, 3)
++
++            params = EquirectangularCameraModelParameters(
++                resolution=np.array([w, h], dtype=np.int64),
++                shutter_type=ShutterType.GLOBAL,
++            )
++
++            int_pixel_coords = torch.tensor(np.stack([u, v], axis=1), dtype=torch.int32)
++            image_points = pixels_to_image_points(int_pixel_coords)
++            rays_d_cam = image_points_to_camera_rays(params, image_points)
++            rays_o_cam = torch.zeros_like(rays_d_cam)
++            pixel_coords = create_pixel_coords(w, h)
++            return (
++                {"resolution": [w, h], "type": "equirectangular"},
++                rays_o_cam.to(torch.float32).reshape(out_shape),
++                rays_d_cam.to(torch.float32).reshape(out_shape),
++                type(params).__name__,
++                pixel_coords,
++            )
++
+ 
++#============================================================================================
++        
+         def create_pinhole_camera(focalx, focaly, w, h):
+             # Generate UV coordinates
+             u = np.tile(np.arange(w), h)
+@@ -243,6 +272,12 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
+                 focal_length_x = intr.params[0] / scaling_factor
+                 focal_length_y = intr.params[1] / scaling_factor
+                 self.intrinsics[intr.id] = create_pinhole_camera(focal_length_x, focal_length_y, width, height)
++            
++            elif intr.model == "EQUIRECTANGULAR": #Theis: Added support for equirectangular cameras by generating rays based on pixel coordinates and camera model parameters
++                # Thesis: equirectangular camera model
++                # Stored as custom COLMAP model_id=99 in create_v2_colmap.py
++                # No focal length needed — rays computed from lon/lat geometry only
++                self.intrinsics[intr.id] = create_equirectangular_camera(width, height)
+ 
+             elif intr.model == "OPENCV_FISHEYE":
+                 params = copy.deepcopy(intr.params)
+diff --git a/threedgrut/datasets/log b/threedgrut/datasets/log
+new file mode 100644
+index 0000000..656a5db
+--- /dev/null
++++ b/threedgrut/datasets/log
+@@ -0,0 +1,366 @@
++    1  ls
++    2  sudo apt update && sudo apt upgrade
++    3  passwd
++    4  pwd
++    5  mkdir thesis
++    6  ls
++    7  sudo apt install build-essential git
++    8  nvidia-smi
++    9  docker --version
++   10  sudo apt-get update
++   11  sudo apt-get install -y ca-certificates curl gnupg
++   12  sudo install -m 0755 -d /etc/apt/keyrings
++   13  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
++   14  sudo chmod a+r /etc/apt/keyrings/docker.gpg
++   15  echo   "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
++   16    $(lsb_release -cs) stable" |   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
++   17  sudo apt-get update
++   18  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
++   19  docker --version
++   20  docker-copose --version
++   21  docker-compose --version
++   22  wsl --shutdown
++   23  docker --version
++   24  docker compose version
++   25  sudo apt update
++   26  sudo apt install docker.io docker-compose-v2
++   27  sudo usermod -aG docker $USER
++   28  docker run hello-world
++   29  docker run --gpus all nvidia/cuda:12.0.0-base-ubuntu20.04 nvidia-smi
++   30  ls
++   31  cd thesis/
++   32  ls
++   33  explorer.exe .
++   34  sudo apt update
++   35  sudo apt install python3 python3-venv python3-pip
++   36  python3 -m venv 3dgut
++   37  cd ~
++   38  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
++   39  bash Miniconda3-latest-Linux-x86_64.sh
++   40  source ~/.bashrc
++   41  conda activate 3dgut
++   42  deactivate
++   43  rm -rf 3dgut
++   44  touch environment.yml
++   45  gedit environment.yml 
++   46  sudo snap install gedit  # version 48.1
++   47  sudo apt install gedit  # version 48.1
++   48  gedit environment.yml
++   49  conda activate 3dgrut
++   50  conda activate 3dgut
++   51  conda create -n 3dgrut python=3.11 -y
++   52  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
++   53  conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
++   54  conda create -n 3dgrut python=3.11 -y
++   55  conda rm 3dgrut
++   56  conda -rm 3dgrut
++   57  conda -n 3dgrut
++   58  conda remove -n 3dgrut
++   59  conda env create -f environment.yml
++   60  gedit environment.yml 
++   61  conda env create -f environment.yml
++   62  gedit environment.yml 
++   63  conda activate 3dgrut
++   64  pip install kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.0_cu118.html
++   65  conda env remove -n 3dgrut
++   66  deactivate
++   67  exit
++   68  conda env remove -n 3dgrut
++   69  explorer.exe .
++   70  conda activate 3dgrut
++   71  conda create -n 3dgrut
++   72  conda activate 3dgrut
++   73  cd 3dgrut && bash install_env.sh 3dgrut
++   74  which gcc-11
++   75  sudo apt-get update && sudo apt-get install -y gcc-11 g++-11
++   76  bash install_env.sh 3dgrut WITH_GCC11
++   77  conda activate 3dgrut
++   78  CC=gcc-11 CXX=g++-11 python render.py   --checkpoint /home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_meetingroom/meetingroom_v1-0305_153353/ours_30000/ckpt_30000.pt   --path /home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1   --out-dir /home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_meetingroom_eval2   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_eval2.log
++   79  conda activate 3dgrut
++   80  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small   n_iterations=7000   dataset.downsample_factor=4   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_small.log
++   81  exit
++   82  cd
++   83  conda activate 3dgrut
++   84  cd ~/thesis/my3dscene/data/datasets/fiord
++   85  mkdir -p meetingroom_v1_small/images_4/cam1
++   86  mkdir -p meetingroom_v1_small/images_4/cam2
++   87  python3 << 'EOF'
++   88  from PIL import Image
++   89  from pathlib import Path
++   90  dst = Path("meetingroom_v1_small/images_4")
++   91  small_images = list(Path("meetingroom_v1_small/images").rglob("*.png"))
++   92  print(f"Resizing {len(small_images)} images...")
++   93  for img_path in small_images:
++   94      rel = img_path.relative_to(Path("meetingroom_v1_small/images"))
++   95      out_path = dst / rel
++   96      out_path.parent.mkdir(parents=True, exist_ok=True)
++   97      if out_path.exists():
++   98          continue
++   99      img = Image.open(img_path)
++  100      w, h = img.size
++  101      img.resize((w//4, h//4), Image.LANCZOS).save(out_path)
++  102      img.close()
++  103      print(f"  {rel} → {w//4}x{h//4}")
++  104  print("Done")
++  105  EOF
++  106  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small2   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   2>&1 | tee ~/thesis/my3dscene/logs/phase1_v1_small2.log
++  107  cd
++  108  conda activate 3dgrut
++  109  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
++  110  disown
++  111  echo "Training running as PID $!"
++  112  conda activate 3dgrut
++  113  cd
++  114  wsl --shutdown
++  115  exit
++  116  cd
++  117  nvidia-smi
++  118  # Kill the unattended upgrades that's hogging resources
++  119  sudo pkill -f unattended-upgrade
++  120  # Verify GPU is free
++  121  nvidia-smi | grep -E "MiB|%"
++  122  # Restart training
++  123  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
++  124  disown
++  125  echo "PID: $!"
++  126  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
++  127  ps aux | grep train | grep -v grep
++  128  conda activate 3dgrut
++  129  # Kill the unattended upgrades that's hogging resources
++  130  sudo pkill -f unattended-upgrade
++  131  # Verify GPU is free
++  132  nvidia-smi | grep -E "MiB|%"
++  133  # Restart training
++  134  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase1_v1_small3.log 2>&1 &
++  135  disown
++  136  echo "PID: $!"
++  137  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
++  138  ps aux | grep train | grep -v grep
++  139  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
++  140  ps aux | grep train | grep -v grep
++  141  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
++  142  ps aux | grep train | grep -v grep
++  143  tail -5 ~/thesis/my3dscene/logs/phase1_v1_small3.log
++  144  ps aux | grep train | grep -v grep
++  145  cat > ~/thesis/my3dscene/logs/phase1_v1_metrics.json << 'EOF'
++  146  {
++  147    "variant": "V1",
++  148    "description": "Perspective pinhole baseline — FIORD MeetingRoom undistorted images",
++  149    "dataset": "FIORD MeetingRoom_In — meetingroom_v1_small (29 images, every 7th)",
++  150    "resolution": "images_4 (734x734, quarter of 2937x2937)",
++  151    "training_steps": 7000,
++  152    "num_workers": 4,
++  153    "config": "colmap_3dgut + downsample_factor=4",
++  154    "metrics": {
++  155      "mean_psnr": 20.764,
++  156      "mean_ssim": 0.705,
++  157      "mean_lpips": 0.444,
++  158      "mean_cc_psnr": 20.419,
++  159      "mean_cc_ssim": 0.687,
++  160      "mean_cc_lpips": 0.448
++  161    },
++  162    "thesis_role": "Ablation V1: perspective pinhole upper-bound reference. Full run on RTX 5090: meetingroom_v1 full dataset, downsample_factor=1, n_iterations=30000"
++  163  }
++  164  EOF
++  165  cd ~/thesis/my3dscene
++  166  git add logs/
++  167  git commit -m "phase1 V1 complete: PSNR=20.764 SSIM=0.705 LPIPS=0.444 (prototype 29img 7Kiter 734px)"
++  168  # Fix git identity
++  169  git config --global user.email "abhilash.masane.de@gmail.com"
++  170  git config --global user.name "Abhilash Masane"
++  171  # Fix logs being ignored — force add
++  172  git add -f logs/
++  173  git commit -m "phase1 V1 complete: PSNR=20.764 SSIM=0.705 LPIPS=0.444 (prototype 29img 7Kiter 734px)"
++  174  conda activate 3dgrut
++  175  tensorboard --logdir ~/thesis/my3dscene/outputs/phase1_v1_small3 --host 0.0.0.0 --port 6006 > /dev/null 2>&1 &
++  176  disown
++  177  conda activate 3dgrut
++  178  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v1_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_view   n_iterations=0   dataset.downsample_factor=4   num_workers=4   with_viser_gui=true   resume=/home/masane_abhi/thesis/my3dscene/outputs/phase1_v1_small3/meetingroom_v1_small-0405_151320/ckpt_last.pt   > ~/thesis/my3dscene/logs/phase1_viser.log 2>&1 &
++  179  # Kill tensorboard
++  180  pkill -f tensorboard
++  181  # Kill viser
++  182  pkill -f "with_viser_gui"
++  183  # Verify everything is stopped
++  184  ps aux | grep -E "tensorboard|viser|train.py" | grep -v grep
++  185  exit
++  186  cd
++  187  ls ~/thesis/my3dscene/data/datasets/fiord/meetingroom_equirect/images_raw/ | wc -l
++  188  conda activate 3dgrut
++  189  cd ~/thesis/my3dscene/data/datasets/fiord
++  190  mkdir -p meetingroom_v2_small/images
++  191  mkdir -p meetingroom_v2_small/sparse/0
++  192  # Subsample equirect images — same every-7th strategy as V1
++  193  python3 << 'EOF'
++import struct, shutil, os
++from pathlib import Path
++
++SRC_IMGS = Path("meetingroom_equirect/images_raw")
++DST      = Path("meetingroom_v2_small")
++
++# Get all stitched images sorted
++imgs = sorted(SRC_IMGS.glob("*.png"))
++print(f"Total equirect images: {len(imgs)}")
++
++# Take every 7th — same count as V1 small dataset
++selected = imgs[::7]
++print(f"Selected: {len(selected)} images (every 7th)")
++
++# Symlink selected images
++img_dst = DST / "images"
++img_dst.mkdir(parents=True, exist_ok=True)
++
++for img in selected:
++    dst = img_dst / img.name
++    if not dst.exists():
++        os.symlink(img.resolve(), dst)
++    print(f"  {img.name}")
++
++print(f"\nSymlinked {len(selected)} images to {img_dst}")
++EOF
++
++  194  cd ~/thesis/my3dscene/data/datasets/fiord
++  195  python3 << 'EOF'
++"""
++Creates COLMAP sparse model for V2 equirectangular dataset.
++Reuses camera poses from fisheye model — same physical positions,
++different camera model (EQUIRECTANGULAR instead of OPENCV_FISHEYE).
++
++COLMAP camera model for equirectangular:
++  model_id = 7 (EQUIRECTANGULAR in newer COLMAP)
++  But 3DGUT does not support EQUIRECTANGULAR natively.
++  
++Instead we use a workaround: store as PINHOLE with very wide FOV,
++and let 3DGUT handle it via its equirectangular dataset loader.
++Actually the cleanest approach: check what 3DGUT supports for ERP.
++"""
++import struct
++from pathlib import Path
++
++# Read fisheye images.bin to get pose for each fisheye frame
++def read_images_bin(path):
++    images = {}
++    with open(path, 'rb') as f:
++        n = struct.unpack('<Q', f.read(8))[0]
++        for _ in range(n):
++            img_id = struct.unpack('<I', f.read(4))[0]
++            qvec   = struct.unpack('<4d', f.read(32))
++            tvec   = struct.unpack('<3d', f.read(24))
++            cam_id = struct.unpack('<I', f.read(4))[0]
++            name   = b''
++            while True:
++                c = f.read(1)
++                if c == b'\x00': break
++                name += c
++            name = name.decode('utf-8')
++            n2d  = struct.unpack('<Q', f.read(8))[0]
++            pts  = struct.unpack(f'<{3*n2d}d', f.read(24*n2d)) if n2d else ()
++            images[img_id] = dict(qvec=qvec, tvec=tvec, cam_id=cam_id,
++                                  name=name, n2d=n2d, pts=pts)
++    return images
++
++fisheye_images = read_images_bin('meetingroom/model/images.bin')
++
++# Build lookup: frame_number -> pose from cam1 fisheye images
++# fisheye filename: IMG_20241120_000613_00_729_fisheye1.png -> frame number = 729
++frame_to_pose = {}
++for img_id, im in fisheye_images.items():
++    if 'cam1' in im['name'] and 'fisheye1' in im['name']:
++        # Extract frame number from filename
++        parts = Path(im['name']).stem.split('_')
++        frame_num = parts[4]  # e.g. '729'
++        frame_to_pose[frame_num] = im
++
++print(f"Found {len(frame_to_pose)} cam1 poses in fisheye model")
++
++# Check which of our 16 selected frames have poses
++selected = sorted(Path('meetingroom_v2_small/images').glob('*.png'))
++print(f"\nChecking {len(selected)} selected equirect frames:")
++matched = []
++for img_path in selected:
++    # frame_729.png -> '729'
++    frame_num = img_path.stem.split('_')[1]
++    if frame_num in frame_to_pose:
++        print(f"  {img_path.name} -> pose found (cam_id={frame_to_pose[frame_num]['cam_id']})")
++        matched.append((img_path, frame_num, frame_to_pose[frame_num]))
++    else:
++        print(f"  {img_path.name} -> NO POSE FOUND")
++
++print(f"\nMatched: {len(matched)}/{len(selected)} frames")
++EOF
++
++  196  python3 ~/thesis/my3dscene/scripts/create_v2_colmap.py
++  197  python3 ~/thesis/my3dscene/scripts/resize_images.py
++  198  touch ~/thesis/my3dscene/scripts/create_v2_colmap.py
++  199  gedit ~/thesis/my3dscene/scripts/create_v2_colmap.py
++  200  touch ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py
++  201  explorer.exe .
++  202  gedit ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py
++  203  python3 ~/thesis/my3dscene/scripts/create_v2_colmap.py
++  204  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
++  205  gedit ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
++  206  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/create_v2_colmap.py
++  207  python3 ~/thesis/my3dscene/scripts/small_scripts_to_do_something/resize_images.py 
++  208  CC=gcc-11 CXX=g++-11 python ~/thesis/3dgrut/train.py   --config-name=apps/colmap_3dgut   path=/home/masane_abhi/thesis/my3dscene/data/datasets/fiord/meetingroom_v2_small   out_dir=/home/masane_abhi/thesis/my3dscene/outputs/phase2_v2_small   n_iterations=7000   dataset.downsample_factor=4   num_workers=4   > ~/thesis/my3dscene/logs/phase2_v2_training.log 2>&1 &
++  209  disown
++  210  echo "V2 training started"
++  211  tail -5 ~/thesis/my3dscene/logs/phase2_v2_training.log
++  212  tail -20 ~/thesis/my3dscene/logs/phase2_v2_training.log
++  213  cat > ~/thesis/my3dscene/logs/phase2_v2_metrics.json << 'EOF'
++{
++  "variant": "V2",
++  "description": "Equirectangular baseline — no distortion correction",
++  "dataset": "FIORD MeetingRoom_In — meetingroom_v2_small (16 images, every 7th)",
++  "resolution": "images_4 (512x256, quarter of 2048x1024)",
++  "training_steps": 7000,
++  "config": "colmap_3dgut + downsample_factor=4",
++  "metrics": {
++    "mean_psnr": 8.960,
++    "mean_ssim": 0.331,
++    "mean_lpips": 0.535
++  },
++  "thesis_role": "Ablation V2: equirectangular without correction. Drop from V1 PSNR=20.764 to 8.960 proves polar distortion problem. V3 solid angle loss should recover this."
++}
++EOF
++
++  214  cd ~/thesis/my3dscene
++  215  git add -f logs/
++  216  git commit -m "V2 complete: equirectangular baseline PSNR=8.960 SSIM=0.331 LPIPS=0.535"
++  217  grep -n "PINHOLE\|OPENCV\|camera_model\|intr.model"   ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py | head -30
++  218  cat ~/thesis/3dgrut/threedgrut/datasets/camera_models.py | head -80
++  219  # See all camera model classes defined
++  220  grep -n "class.*Camera\|def.*ray\|def.*unproject\|def.*pixel_to"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  221  # See the full block where camera models are handled in dataset_colmap.py
++  222  sed -n '230,270p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
++  223  # See what the fisheye model class looks like — we model ERP similarly
++  224  grep -n "class.*Fisheye\|class.*OpenCV"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  225  # See create_pinhole_camera and create_fisheye_camera functions
++  226  grep -n "def create_pinhole\|def create_fisheye\|def image_points_to_camera_rays"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  227  # See the full fisheye camera model class
++  228  sed -n '89,155p' ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  229  # See image_points_to_camera_rays function — this is the key function
++  230  sed -n '151,230p' ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  231  grep -n "def create_fisheye\|def create_pinhole"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  232  # See those functions fully
++  233  grep -n "def create_" ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  234  # Also check what's imported in dataset_colmap.py from camera_models
++  235  sed -n '28,35p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
++  236  # Check full camera_models.py line count
++  237  wc -l ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  238  grep -n "def create_fisheye\|def create_pinhole"   ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  239  # See those functions fully
++  240  grep -n "def create_" ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  241  # Also check what's imported in dataset_colmap.py from camera_models
++  242  sed -n '28,35p' ~/thesis/3dgrut/threedgrut/datasets/dataset_colmap.py
++  243  # Check full camera_models.py line count
++  244  wc -l ~/thesis/3dgrut/threedgrut/datasets/camera_models.py
++  245  cd ..
++  246  cd 3dggrut
++  247  cd 3dgrut/
++  248  ls
++  249  cd threedgrut
++  250  ls
++  251  cd datasets/
++  252  ls
++  253  gedit camera_models.py
++  254  history
++  255  history | tee log
+diff --git a/threedgrut/datasets/protocols.py b/threedgrut/datasets/protocols.py
+index 6d5e982..d7a5957 100644
+--- a/threedgrut/datasets/protocols.py
++++ b/threedgrut/datasets/protocols.py
+@@ -30,6 +30,7 @@ class Batch:
+     intrinsics: Optional[list] = None
+     intrinsics_OpenCVPinholeCameraModelParameters: Optional[dict] = None
+     intrinsics_OpenCVFisheyeCameraModelParameters: Optional[dict] = None
++    intrinsics_EquirectangularCameraModelParameters: Optional[dict] = None  # Thesis: added for equirectangular support
+     # Camera/frame indices for post-processing
+     camera_idx: int = -1  # 0-based camera index
+     frame_idx: int = -1  # 0-based frame index (global across split)
+diff --git a/threedgrut/datasets/utils.py b/threedgrut/datasets/utils.py
+index aafdba5..c4c48d5 100644
+--- a/threedgrut/datasets/utils.py
++++ b/threedgrut/datasets/utils.py
+@@ -254,6 +254,7 @@ CAMERA_MODELS = {
+     CameraModel(model_id=8, model_name="SIMPLE_RADIAL_FISHEYE", num_params=4),
+     CameraModel(model_id=9, model_name="RADIAL_FISHEYE", num_params=5),
+     CameraModel(model_id=10, model_name="THIN_PRISM_FISHEYE", num_params=12),
++    CameraModel(model_id=99, model_name="EQUIRECTANGULAR", num_params=2), #Thesis
+ }
+ CAMERA_MODEL_IDS = dict([(camera_model.model_id, camera_model) for camera_model in CAMERA_MODELS])
+ CAMERA_MODEL_NAMES = dict([(camera_model.model_name, camera_model) for camera_model in CAMERA_MODELS])
+diff --git a/threedgrut/render.py b/threedgrut/render.py
+index 3cd1c38..a32456d 100644
+--- a/threedgrut/render.py
++++ b/threedgrut/render.py
+@@ -196,7 +196,7 @@ class Renderer:
+         if self.compute_extra_metrics:
+             criterions |= {
+                 "ssim": StructuralSimilarityIndexMeasure(data_range=1.0).to("cuda"),
+-                "lpips": LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).to("cuda"),
++                "lpips": LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=True).to("cpu"),
+             }
+ 
+         output_path_renders = os.path.join(self.out_dir, f"ours_{int(self.global_step)}", "renders")
+@@ -278,8 +278,8 @@ class Renderer:
+             )
+             lpips.append(
+                 criterions["lpips"](
+-                    pred_rgb_full.clip(0, 1).permute(0, 3, 1, 2),
+-                    rgb_gt_full.permute(0, 3, 1, 2),
++                    pred_rgb_full.clip(0, 1).permute(0, 3, 1, 2).cpu(),
++                    rgb_gt_full.permute(0, 3, 1, 2).cpu(),
+                 ).item()
+             )
+ 
+@@ -294,8 +294,8 @@ class Renderer:
+             )
+             cc_lpips.append(
+                 criterions["lpips"](
+-                    pred_rgb_cc.clip(0, 1).permute(0, 3, 1, 2),
+-                    rgb_gt_full.permute(0, 3, 1, 2),
++                    pred_rgb_cc.clip(0, 1).permute(0, 3, 1, 2).cpu(),
++                    rgb_gt_full.permute(0, 3, 1, 2).cpu(),
+                 ).item()
+             )
+ 
+diff --git a/threedgrut/trainer.py b/threedgrut/trainer.py
+index 4aab31f..e6e6ca9 100644
+--- a/threedgrut/trainer.py
++++ b/threedgrut/trainer.py
+@@ -448,6 +448,149 @@ class Trainer3DGRUT:
+ 
+         return metrics
+ 
++#     @torch.cuda.nvtx.range("get_losses")
++#     def get_losses(
++#         self, gpu_batch: dict[str, torch.Tensor], outputs: dict[str, torch.Tensor]
++#     ) -> dict[str, torch.Tensor]:
++#         """Computes dictionary of losses for current batch.
++#         Args:
++#             gpu_batch: GT data of current batch
++#             outputs: model prediction for current batch
++#         Returns:
++#             losses: dictionary of loss terms computed for current batch.
++#         """
++#         rgb_gt = gpu_batch.rgb_gt
++#         rgb_pred = outputs["pred_rgb"]
++#         mask = gpu_batch.mask
++
++#         # Mask out the invalid pixels if the mask is provided
++#         if mask is not None:
++#             rgb_gt = rgb_gt * mask
++#             rgb_pred = rgb_pred * mask
++# #============================================================================================================================
++        
++#         # V3 Thesis: solid angle loss weighting for Equirectangular dataset:
++
++#         # L1 loss
++#         loss_l1 = torch.zeros(1, device=self.device)
++#         lambda_l1 = 0.0
++#         if self.conf.loss.use_l1:
++#             with torch.cuda.nvtx.range(f"loss-l1"):
++#                 l1_per_pixel = torch.abs(rgb_pred - rgb_gt)  # (1, H, W, 3)
++
++#                 # Controlled by config flag loss.use_solid_angle_loss
++#                 # false --> V1/V2 equal pixel weights (original behaviour)
++#                 # true  --> V3/V4 sin(pi*v/H) weighting per pixel row
++#                 #
++#                 # sin(pi*v/H) weights each row by its real-world solid angle.
++
++#                 # if getattr(self.conf.loss, 'use_solid_angle_loss', False):
++#                 #     H = rgb_gt.shape[1]
++#                 #     v_coords = torch.arange(H, device=rgb_gt.device,
++#                 #                             dtype=torch.float32)
++#                 #     # sin(pi*v/H): 0 at poles, 1 at equator
++#                 #     weights = torch.sin(torch.pi * v_coords / H)
++#                 #     # reshape to (1,H,1,1) for broadcasting over batch,W,channels
++#                 #     weights = weights.reshape(1, H, 1, 1)
++#                 #     # normalize so total loss magnitude stays same as unweighted
++#                 #     weights = weights / (weights.mean() + 1e-8)
++#                 #     loss_l1 = (l1_per_pixel * weights).mean()
++#                 # else:
++#                 #     loss_l1 = l1_per_pixel.mean()
++#                 # # ── end solid angle weighting ───────────────────────────────────
++
++#                 # lambda_l1 = self.conf.loss.lambda_l1
++
++#                 if getattr(self.conf.loss, 'use_solid_angle_loss', False):
++#                     H = rgb_gt.shape[1]
++#                     W = rgb_gt.shape[2]
++
++#                     is_fisheye = (
++#                         hasattr(gpu_batch, 'intrinsics_OpenCVFisheyeCameraModelParameters')
++#                         and gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters is not None
++#                     )
++#                     is_erp = (
++#                         hasattr(gpu_batch, 'intrinsics_EquirectangularCameraModelParameters')
++#                         and gpu_batch.intrinsics_EquirectangularCameraModelParameters is not None
++#                     )
++
++#                     if is_fisheye:
++#                         intr = gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters
++#                         fx = float(intr['focal_length'][0])
++#                         cx = float(intr['principal_point'][0])
++#                         cy = float(intr['principal_point'][1])
++#                         u_coords = torch.arange(W, device=rgb_gt.device, dtype=torch.float32)
++#                         v_coords = torch.arange(H, device=rgb_gt.device, dtype=torch.float32)
++#                         vv, uu = torch.meshgrid(v_coords, u_coords, indexing='ij')
++#                         r = torch.sqrt((uu - cx) ** 2 + (vv - cy) ** 2)
++#                         theta = r / fx
++#                         weights = torch.sin(theta) / (theta + 1e-8)
++#                         weights = weights.reshape(1, H, W, 1)
++
++#                     elif is_erp:
++#                         v_coords = torch.arange(H, device=rgb_gt.device, dtype=torch.float32)
++#                         weights = torch.sin(torch.pi * v_coords / H)
++#                         weights = weights.reshape(1, H, 1, 1)
++
++#                     else:
++#                         weights = torch.ones(1, 1, 1, 1,
++#                                              device=rgb_gt.device,
++#                                              dtype=torch.float32)
++
++#                     weights = weights / (weights.mean() + 1e-8)
++#                     loss_l1 = (l1_per_pixel * weights).mean()
++
++#                 else:
++#                     loss_l1 = l1_per_pixel.mean()
++#                 # ── end solid angle weighting ───────────────────────────────────
++#                 lambda_l1 = self.conf.loss.lambda_l1
++# #============================================================================================================================
++
++#         # L2 loss
++#         loss_l2 = torch.zeros(1, device=self.device)
++#         lambda_l2 = 0.0
++#         if self.conf.loss.use_l2:
++#             with torch.cuda.nvtx.range(f"loss-l2"):
++#                 loss_l2 = torch.nn.functional.mse_loss(outputs["pred_rgb"], rgb_gt)
++#                 lambda_l2 = self.conf.loss.lambda_l2
++
++#         # DSSIM loss
++#         loss_ssim = torch.zeros(1, device=self.device)
++#         lambda_ssim = 0.0
++#         if self.conf.loss.use_ssim:
++#             with torch.cuda.nvtx.range(f"loss-ssim"):
++#                 rgb_gt_full = torch.permute(rgb_gt, (0, 3, 1, 2))
++#                 pred_rgb_full = torch.permute(rgb_pred, (0, 3, 1, 2))
++#                 loss_ssim = 1.0 - ssim(pred_rgb_full, rgb_gt_full)
++#                 lambda_ssim = self.conf.loss.lambda_ssim
++
++#         # Opacity regularization
++#         loss_opacity = torch.zeros(1, device=self.device)
++#         lambda_opacity = 0.0
++#         if self.conf.loss.use_opacity:
++#             with torch.cuda.nvtx.range(f"loss-opacity"):
++#                 loss_opacity = torch.abs(self.model.get_density()).mean()
++#                 lambda_opacity = self.conf.loss.lambda_opacity
++
++#         # Scale regularization
++#         loss_scale = torch.zeros(1, device=self.device)
++#         lambda_scale = 0.0
++#         if self.conf.loss.use_scale:
++#             with torch.cuda.nvtx.range(f"loss-scale"):
++#                 loss_scale = torch.abs(self.model.get_scale()).mean()
++#                 lambda_scale = self.conf.loss.lambda_scale
++
++#         # Total loss
++#         loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
++#         return dict(
++#             total_loss=loss,
++#             l1_loss=lambda_l1 * loss_l1,
++#             l2_loss=lambda_l2 * loss_l2,
++#             ssim_loss=lambda_ssim * loss_ssim,
++#             opacity_loss=lambda_opacity * loss_opacity,
++#             scale_loss=lambda_scale * loss_scale,
++#         )
++
+     @torch.cuda.nvtx.range("get_losses")
+     def get_losses(
+         self, gpu_batch: dict[str, torch.Tensor], outputs: dict[str, torch.Tensor]
+@@ -462,56 +605,113 @@ class Trainer3DGRUT:
+         rgb_gt = gpu_batch.rgb_gt
+         rgb_pred = outputs["pred_rgb"]
+         mask = gpu_batch.mask
++        device = rgb_gt.device
++
++        # ── Solid-angle weights (unnormalized) ───────────────────────────────
++        H, W = rgb_gt.shape[1], rgb_gt.shape[2]
++        weights = torch.ones(1, 1, 1, 1, device=device, dtype=torch.float32)
++
++        if getattr(self.conf.loss, 'use_solid_angle_loss', False):
++            is_fisheye = (
++                hasattr(gpu_batch, 'intrinsics_OpenCVFisheyeCameraModelParameters')
++                and gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters is not None
++            )
++            is_erp = (
++                hasattr(gpu_batch, 'intrinsics_EquirectangularCameraModelParameters')
++                and gpu_batch.intrinsics_EquirectangularCameraModelParameters is not None
++            )
+ 
+-        # Mask out the invalid pixels if the mask is provided
++            if is_fisheye:
++                intr = gpu_batch.intrinsics_OpenCVFisheyeCameraModelParameters
++                fx = float(intr['focal_length'][0])
++                cx = float(intr['principal_point'][0])
++                cy = float(intr['principal_point'][1])
++                u = torch.arange(W, device=device, dtype=torch.float32)
++                v = torch.arange(H, device=device, dtype=torch.float32)
++                vv, uu = torch.meshgrid(v, u, indexing='ij')
++                r = torch.sqrt((uu - cx) ** 2 + (vv - cy) ** 2)
++                theta = r / fx
++                weights = torch.sinc(theta / torch.pi).view(1, H, W, 1)
++
++            elif is_erp:
++                v = torch.arange(H, device=device, dtype=torch.float32)
++                # Pixel-center weight: sin(pi*(v+0.5)/H) avoids exact zero at poles
++                weights = torch.sin(torch.pi * (v + 0.5) / H).view(1, H, 1, 1)
++
++        # Apply mask to weights (masked pixels get zero weight automatically)
+         if mask is not None:
+-            rgb_gt = rgb_gt * mask
+-            rgb_pred = rgb_pred * mask
++            weights = weights * mask
+ 
+-        # L1 loss
+-        loss_l1 = torch.zeros(1, device=self.device)
++        # ── L1 loss (solid-angle weighted) ───────────────────────────────────
++        loss_l1 = torch.zeros(1, device=device)
+         lambda_l1 = 0.0
+         if self.conf.loss.use_l1:
+             with torch.cuda.nvtx.range(f"loss-l1"):
+-                loss_l1 = torch.abs(rgb_pred - rgb_gt).mean()
++                l1_map = torch.abs(rgb_pred - rgb_gt)          # (B, H, W, 3)
++                denom = weights.expand_as(l1_map).sum().clamp_min(1e-8)
++                loss_l1 = (weights * l1_map).sum() / denom
+                 lambda_l1 = self.conf.loss.lambda_l1
+ 
+-        # L2 loss
+-        loss_l2 = torch.zeros(1, device=self.device)
++        # ── L2 loss (solid-angle weighted) ───────────────────────────────────
++        loss_l2 = torch.zeros(1, device=device)
+         lambda_l2 = 0.0
+         if self.conf.loss.use_l2:
+             with torch.cuda.nvtx.range(f"loss-l2"):
+-                loss_l2 = torch.nn.functional.mse_loss(outputs["pred_rgb"], rgb_gt)
++                l2_map = (rgb_pred - rgb_gt) ** 2              # (B, H, W, 3)
++                denom = weights.expand_as(l2_map).sum().clamp_min(1e-8)
++                loss_l2 = (weights * l2_map).sum() / denom
+                 lambda_l2 = self.conf.loss.lambda_l2
+ 
+-        # DSSIM loss
+-        loss_ssim = torch.zeros(1, device=self.device)
++        # ── SSIM loss (standard, unweighted — threedgrut ssim returns scalar) ─
++        loss_ssim = torch.zeros(1, device=device)
+         lambda_ssim = 0.0
++        # if self.conf.loss.use_ssim:
++        #     with torch.cuda.nvtx.range(f"loss-ssim"):
++        #         rgb_gt_full = rgb_gt.permute(0, 3, 1, 2)
++        #         pred_rgb_full = rgb_pred.permute(0, 3, 1, 2)
++        #         loss_ssim = 1.0 - ssim(pred_rgb_full, rgb_gt_full)
++        #         lambda_ssim = self.conf.loss.lambda_ssim
++
+         if self.conf.loss.use_ssim:
+             with torch.cuda.nvtx.range(f"loss-ssim"):
+-                rgb_gt_full = torch.permute(rgb_gt, (0, 3, 1, 2))
+-                pred_rgb_full = torch.permute(rgb_pred, (0, 3, 1, 2))
++                if mask is not None:
++                    mask_f = mask.to(dtype=rgb_gt.dtype, device=rgb_gt.device)
++                    rgb_gt_ssim = rgb_gt * mask_f
++                    rgb_pred_ssim = rgb_pred * mask_f
++                else:
++                    rgb_gt_ssim = rgb_gt
++                    rgb_pred_ssim = rgb_pred
++                rgb_gt_full = rgb_gt_ssim.permute(0, 3, 1, 2)
++                pred_rgb_full = rgb_pred_ssim.permute(0, 3, 1, 2)
+                 loss_ssim = 1.0 - ssim(pred_rgb_full, rgb_gt_full)
+                 lambda_ssim = self.conf.loss.lambda_ssim
+ 
+-        # Opacity regularization
+-        loss_opacity = torch.zeros(1, device=self.device)
++        # ── Opacity regularization ───────────────────────────────────────────
++        loss_opacity = torch.zeros(1, device=device)
+         lambda_opacity = 0.0
+         if self.conf.loss.use_opacity:
+             with torch.cuda.nvtx.range(f"loss-opacity"):
+                 loss_opacity = torch.abs(self.model.get_density()).mean()
+                 lambda_opacity = self.conf.loss.lambda_opacity
+ 
+-        # Scale regularization
+-        loss_scale = torch.zeros(1, device=self.device)
++        # ── Scale regularization ─────────────────────────────────────────────
++        loss_scale = torch.zeros(1, device=device)
+         lambda_scale = 0.0
+         if self.conf.loss.use_scale:
+             with torch.cuda.nvtx.range(f"loss-scale"):
+                 loss_scale = torch.abs(self.model.get_scale()).mean()
+                 lambda_scale = self.conf.loss.lambda_scale
+ 
+-        # Total loss
+-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
++        # ── Total loss ───────────────────────────────────────────────────────
++        # NOTE: Original 3DGUT code was missing lambda_l2 * loss_l2 in the sum.
++        loss = (
++            lambda_l1 * loss_l1
++            + lambda_l2 * loss_l2
++            + lambda_ssim * loss_ssim
++            + lambda_opacity * loss_opacity
++            + lambda_scale * loss_scale
++        )
++
+         return dict(
+             total_loss=loss,
+             l1_loss=lambda_l1 * loss_l1,
+@@ -521,6 +721,7 @@ class Trainer3DGRUT:
+             scale_loss=lambda_scale * loss_scale,
+         )
+ 
++
+     @torch.cuda.nvtx.range("log_validation_iter")
+     def log_validation_iter(
+         self,
+diff --git a/threedgrut_playground/download_assets.sh b/threedgrut_playground/download_assets.sh
+old mode 100755
+new mode 100644
+diff --git a/threedgut_tracer/tracer.py b/threedgut_tracer/tracer.py
+index b559123..281f2d7 100644
+--- a/threedgut_tracer/tracer.py
++++ b/threedgut_tracer/tracer.py
+@@ -423,6 +423,42 @@ class Tracer:
+             )
+             return camera_model_parameters, pose_model.get_sensor_pose()
+ 
++#============================================================================================================================
++
++        # Thesis: ERP camera model for 3DGUT Unscented Transform rendering
++        elif (K := gpu_batch.intrinsics_EquirectangularCameraModelParameters) is not None:
++            
++            #
++            # The CUDA rendering kernel only supports PINHOLE and FISHEYE natively.
++            # ERP is mapped to PINHOLE using the spherical focal length convention:
++            #   fx = W / (2*pi)   — horizontal angular resolution
++            #   fy = H / pi       — vertical angular resolution
++            #   cx = W / 2        — principal point at image center
++            #   cy = H / 2        — principal point at image center
++            #
++            # This is mathematically exact at the equator and a valid first-order
++            # approximation at other latitudes.
++
++            # Note: a native ERP CUDA kernel would require modifying the C++ plugin.
++            # This approximation is according with FullCircle (CVPR 2024) approach.
++
++            W = float(K["resolution"][0])
++            H = float(K["resolution"][1])
++            fx_erp = W / (2.0 * math.pi)
++            fy_erp = H / math.pi
++            cx_erp = W / 2.0
++            cy_erp = H / 2.0
++            camera_model_parameters = _3dgut_plugin.fromOpenCVPinholeCameraModelParameters(
++                resolution=K["resolution"], 
++                shutter_type=_3dgut_plugin.ShutterType.GLOBAL,
++                principal_point=np.array([cx_erp, cy_erp], dtype=np.float32),
++                focal_length=np.array([fx_erp, fy_erp], dtype=np.float32),
++                radial_coeffs=np.zeros((6,), dtype=np.float32),
++                tangential_coeffs=np.zeros((2,), dtype=np.float32),
++                thin_prism_coeffs=np.zeros((4,), dtype=np.float32),
++            )
++            return camera_model_parameters, pose_model.get_sensor_pose()
++
+         raise ValueError(
+             f"Camera intrinsics unavailable or unsupported, input keys are [{', '.join(gpu_batch.keys())}]"
+         )
+diff --git a/train.py b/train.py
+index aa725fc..9a5eb52 100644
+--- a/train.py
++++ b/train.py
+@@ -17,6 +17,7 @@ import subprocess
+ 
+ import hydra
+ from omegaconf import DictConfig, OmegaConf
++import torch
+ 
+ from threedgrut.utils.logger import logger
+ from threedgrut.utils.timer import timing_options
+@@ -35,8 +36,23 @@ def get_git_revision_hash() -> str:
+         return "Unknown"
+ 
+ 
++# @hydra.main(config_path="configs", version_base=None)
++# def main(conf: DictConfig) -> None:
++#     logger.info(f"Git hash: {get_git_revision_hash()}")
++#     logger.info(f"Compiling native code..")
++#     from threedgrut.trainer import Trainer3DGRUT
++
+ @hydra.main(config_path="configs", version_base=None)
+ def main(conf: DictConfig) -> None:
++    seed = conf.get("seed", None)
++    if seed is not None:
++        import random
++        import numpy as np
++        random.seed(seed)
++        np.random.seed(seed)
++        torch.manual_seed(seed)
++        torch.cuda.manual_seed_all(seed)
++        logger.info(f"Seeded run with seed={seed}")
+     logger.info(f"Git hash: {get_git_revision_hash()}")
+     logger.info(f"Compiling native code..")
+     from threedgrut.trainer import Trainer3DGRUT
