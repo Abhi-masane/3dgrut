@@ -208,70 +208,136 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             focal_length = params[0:2].astype(np.float32)
             radial_coeffs = params[4:].astype(np.float32)
             # Estimate max angle for fisheye
-            max_radius_pixels = compute_max_radius(resolution.astype(np.float64), principal_point)
-            fov_angle_x = 2.0 * max_radius_pixels / focal_length[0]
-            fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
+            # max_radius_pixels = compute_max_radius(resolution.astype(np.float64), principal_point)
+            max_radius_pixels = np.min([
+                principal_point[0],
+                principal_point[1],
+                resolution[0] - principal_point[0],
+                resolution[1] - principal_point[1],
+            ])
+            # fov_angle_x = 2.0 * max_radius_pixels / focal_length[0]
+            # fov_angle_y = 2.0 * max_radius_pixels / focal_length[1]
 
-            max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0 
-            nvidia_max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
-   
-            #max_angle = np.deg2rad(85.0) # Override to 85 degrees - experimenting with ignoring the outer problematic ring
+            # max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0 
+            def invert_opencv_fisheye_radius(rd, k, theta_max=np.deg2rad(110.0)):
+                """
+                Invert OpenCV fisheye:
+                    rd = theta * (1 + k1*t^2 + k2*t^4 + k3*t^6 + k4*t^8)
+
+                We search from theta=0 outward and return the first physical root.
+                """
+                k1, k2, k3, k4 = k
+
+                def theta_distorted(theta):
+                    t2 = theta * theta
+                    return theta * (
+                        1.0
+                        + k1 * t2
+                        + k2 * t2**2
+                        + k3 * t2**3
+                        + k4 * t2**4
+                    )
+
+                samples = np.linspace(0.0, theta_max, 20000)
+                vals = np.array([theta_distorted(t) for t in samples])
+
+                diff = vals - rd
+
+                idx = np.where(np.sign(diff[:-1]) != np.sign(diff[1:]))[0]
+
+                if len(idx) == 0:
+                    raise RuntimeError(
+                        f"Could not invert fisheye radius rd={rd:.6f}"
+                    )
+
+                lo = samples[idx[0]]
+                hi = samples[idx[0] + 1]
+
+                for _ in range(50):
+                    mid = 0.5 * (lo + hi)
+
+                    if theta_distorted(mid) < rd:
+                        lo = mid
+                    else:
+                        hi = mid
+
+                return 0.5 * (lo + hi)
+
+
+            rd_x = max_radius_pixels / focal_length[0]
+            rd_y = max_radius_pixels / focal_length[1]
+
+            theta_x = invert_opencv_fisheye_radius(
+                rd_x,
+                radial_coeffs
+            )
+
+            theta_y = invert_opencv_fisheye_radius(
+                rd_y,
+                radial_coeffs
+            )
+
+            max_angle = np.max([theta_x, theta_y])
+
+            true_circle_max_angle = max_angle
+
+            max_angle = min(
+                true_circle_max_angle,
+                np.deg2rad(90.0)
+            )
 
             print(
-            "[FISHEYE FOV BASELINE]"
-            f" NVIDIA={np.rad2deg(nvidia_max_angle):.2f} deg half-FoV,"
-            f" active={np.rad2deg(max_angle):.2f} deg half-FoV,"
-            f" full FoV={2.0 * np.rad2deg(max_angle):.2f} deg"
+                f"[FISHEYE TEST160] "
+                f"true_circle={np.rad2deg(true_circle_max_angle):.2f} deg half, "
+                f"active={np.rad2deg(max_angle):.2f} deg half, "
+                f"active_full={2*np.rad2deg(max_angle):.2f} deg"
+            )
+
+            print(
+                f"[FISHEYE CIRCLE TRUE ANGLE] "
+                f"radius={max_radius_pixels:.2f}px, "
+                f"theta_x={np.rad2deg(theta_x):.2f} deg, "
+                f"theta_y={np.rad2deg(theta_y):.2f} deg, "
+                f"ACTIVE half-FoV={np.rad2deg(max_angle):.2f} deg, "
+                f"full-FoV={2*np.rad2deg(max_angle):.2f} deg"
+            )
+            # nvidia_max_angle = np.max([fov_angle_x, fov_angle_y]) / 2.0
+            # max_angle = nvidia_max_angle
+            
+            print(
+                f"[FISHEYE CIRCLE RADIUS] "
+                f"radius={max_radius_pixels:.2f}px, "
+                f"half-FoV={np.rad2deg(max_angle):.2f} deg, "
+                f"full-FoV={2*np.rad2deg(max_angle):.2f} deg"
             )
 
             print("\n" + "=" * 80)
             print("[3DGRUT FISHEYE CAMERA DEBUG]")
-
             print("resolution:", resolution)
-            print("width:", w)
-            print("height:", h)
-
+            print("width:", width)
+            print("height:", height)
             print("fx:", focal_length[0])
             print("fy:", focal_length[1])
-
             print("cx:", principal_point[0])
             print("cy:", principal_point[1])
-
             print("distortion k1 k2 k3 k4:", radial_coeffs)
 
             print(
                 "principal-point offset from image center:",
-                principal_point[0] - w / 2.0,
-                principal_point[1] - h / 2.0,
+                principal_point[0] - width / 2.0,
+                principal_point[1] - height / 2.0,
             )
 
             print("radius left:", principal_point[0])
-            print("radius right:", w - principal_point[0])
+            print("radius right:", width - principal_point[0])
             print("radius top:", principal_point[1])
-            print("radius bottom:", h - principal_point[1])
+            print("radius bottom:", height - principal_point[1])
 
-            print("NVIDIA max_radius_pixels:", max_radius_pixels)
-
-            print(
-                "fov_angle_x full deg:",
-                np.rad2deg(fov_angle_x),
-            )
-
-            print(
-                "fov_angle_y full deg:",
-                np.rad2deg(fov_angle_y),
-            )
-
-            print(
-                "max_angle half-FoV deg:",
-                np.rad2deg(max_angle),
-            )
-
-            print(
-                "implied full FoV deg:",
-                2.0 * np.rad2deg(max_angle),
-            )
-
+            print("circle max_radius_pixels:", max_radius_pixels)
+            print("theta_x half-FoV deg:", np.rad2deg(theta_x))
+            print("theta_y half-FoV deg:", np.rad2deg(theta_y))
+            print("ACTIVE max_angle half-FoV deg:", np.rad2deg(max_angle))
+            print("ACTIVE full FoV deg:", 2.0 * np.rad2deg(max_angle))
             print("=" * 80 + "\n")
 #==========================================================================================================================            
             params = OpenCVFisheyeCameraModelParameters(
