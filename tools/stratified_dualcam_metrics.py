@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
-"""
-stratified_dualcam_metrics.py
+"""Angular PSNR/SSIM evaluation for MeetingRoom held-out views.
 
-Comparable angular-band evaluation for V1/V2/V3/V4/V4a.
+Default angular bands are 0-30, 30-60, and 60-90 degrees from the optical
+axis. Native fisheye angles are obtained by inverting the calibrated
+OPENCV_FISHEYE polynomial. A PINHOLE/SIMPLE_PINHOLE baseline is also supported
+for completeness, although bands outside its actual image FoV will naturally
+contain no pixels.
 
-Native fisheye variants:
-- parses every COLMAP camera;
-- uses the correct OPENCV_FISHEYE intrinsics/distortion for each held-out image;
-- bins pixels by original viewing angle;
-- applies the exact dataset *_mask.png.
-
-V1 cubemap variant:
-- reads source_map.json;
-- maps each virtual PINHOLE ray back to the ORIGINAL fisheye-camera frame;
-- therefore 0-30, 30-60, 60-90 degree bands mean the same thing as in
-  V2/V3/V4/V4a.
-
-Reports ALL, CAM1 and CAM2.
+LPIPS is intentionally not computed per angular band.
 """
 
 import argparse
@@ -29,66 +20,119 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity
 
-try:
-    import torch
-    from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-except Exception:
-    torch = None
-    LearnedPerceptualImagePatchSimilarity = None
+
+def validate_ssim_window(win_size: int) -> None:
+    if win_size < 3 or win_size % 2 == 0:
+        raise ValueError("--ssim-win-size must be an odd integer >= 3")
 
 
-def parse_cameras_txt(path):
-    cams = {}
-    for line in Path(path).read_text().splitlines():
+def read_cameras(path: Path):
+    cameras = {}
+    for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        s = line.split()
-        cams[int(s[0])] = {
-            "model": s[1],
-            "width": int(s[2]),
-            "height": int(s[3]),
-            "params": list(map(float, s[4:])),
+        parts = line.split()
+        cameras[int(parts[0])] = {
+            "model": parts[1],
+            "width": int(parts[2]),
+            "height": int(parts[3]),
+            "params": list(map(float, parts[4:])),
         }
-    return cams
+    return cameras
 
 
-def parse_images_txt(path):
+def read_images(path: Path):
     lines = [
-        x.strip()
-        for x in Path(path).read_text().splitlines()
-        if x.strip() and not x.startswith("#")
+        line.strip()
+        for line in path.read_text().splitlines()
+        if line.strip() and not line.startswith("#")
     ]
-    records = []
+
+    if len(lines) % 2 != 0:
+        raise RuntimeError(f"Unexpected COLMAP images.txt structure: {path}")
+
+    images = []
     for i in range(0, len(lines), 2):
-        s = lines[i].split()
-        if len(s) >= 10:
-            records.append((s[9], int(s[8])))
-    records.sort(key=lambda x: x[0])
-    return records
+        parts = lines[i].split()
+        if len(parts) < 10:
+            raise RuntimeError(f"Malformed COLMAP image line: {lines[i]}")
+        images.append((parts[9], int(parts[8])))
+
+    images.sort(key=lambda x: x[0])
+    return images
 
 
-def fisheye_theta_map(H, W, cam):
-    p = cam["params"]
-    fx, fy, cx, cy, k1, k2, k3, k4 = p[:8]
+def locate_render_dir(run_dir: Path, step: int):
+    ours_dir = run_dir / f"ours_{step}"
+    render_dir = ours_dir / "renders"
 
-    sx = W / cam["width"]
-    sy = H / cam["height"]
+    if render_dir.exists():
+        return run_dir, ours_dir, render_dir
 
-    fx *= sx
-    cx *= sx
-    fy *= sy
-    cy *= sy
+    candidates = list(run_dir.rglob(f"ours_{step}/renders"))
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"Cannot uniquely locate renders for step {step}; "
+            f"found {len(candidates)} candidates"
+        )
 
-    u = np.arange(W, dtype=np.float64) + 0.5
-    v = np.arange(H, dtype=np.float64) + 0.5
+    render_dir = candidates[0]
+    ours_dir = render_dir.parent
+    return ours_dir.parent, ours_dir, render_dir
+
+
+def sorted_render_files(render_dir: Path, expected_count: int):
+    files = list(render_dir.glob("*.png"))
+    if len(files) != expected_count:
+        raise RuntimeError(
+            f"Found {len(files)} renders but expected {expected_count} test views"
+        )
+
+    if files and all(p.stem.isdigit() for p in files):
+        files.sort(key=lambda p: int(p.stem))
+        indices = [int(p.stem) for p in files]
+        if indices != list(range(expected_count)):
+            raise RuntimeError(
+                "Numeric render filenames are not the expected contiguous "
+                f"0..{expected_count - 1} sequence."
+            )
+    else:
+        files.sort()
+
+    return files
+
+
+def scaled_intrinsics(height, width, camera):
+    sx = width / camera["width"]
+    sy = height / camera["height"]
+    return sx, sy
+
+
+def fisheye_angles(height, width, camera):
+    if camera["model"] != "OPENCV_FISHEYE":
+        raise RuntimeError(
+            f"Expected OPENCV_FISHEYE, got {camera['model']}"
+        )
+    if len(camera["params"]) < 8:
+        raise RuntimeError("OPENCV_FISHEYE camera requires 8 parameters")
+
+    fx, fy, cx, cy, k1, k2, k3, k4 = camera["params"][:8]
+    sx, sy = scaled_intrinsics(height, width, camera)
+    fx, cx = fx * sx, cx * sx
+    fy, cy = fy * sy, cy * sy
+
+    u = np.arange(width, dtype=np.float64) + 0.5
+    v = np.arange(height, dtype=np.float64) + 0.5
     vv, uu = np.meshgrid(v, u, indexing="ij")
 
     rd = np.sqrt(
-        ((uu - cx) / fx) ** 2 +
-        ((vv - cy) / fy) ** 2
+        ((uu - cx) / fx) ** 2
+        + ((vv - cy) / fy) ** 2
     )
 
+    # rd = theta_d = theta * (1 + k1 theta^2 + ... + k4 theta^8)
+    # Invert with bounded Newton iterations.
     theta = np.clip(rd.copy(), 0.0, np.deg2rad(179.0))
 
     for _ in range(12):
@@ -98,403 +142,405 @@ def fisheye_theta_map(H, W, cam):
         t8 = t4 * t4
 
         f = theta * (
-            1.0 + k1*t2 + k2*t4 + k3*t6 + k4*t8
+            1.0 + k1 * t2 + k2 * t4 + k3 * t6 + k4 * t8
         ) - rd
-
-        fp = (
+        df = (
             1.0
-            + 3.0*k1*t2
-            + 5.0*k2*t4
-            + 7.0*k3*t6
-            + 9.0*k4*t8
+            + 3.0 * k1 * t2
+            + 5.0 * k2 * t4
+            + 7.0 * k3 * t6
+            + 9.0 * k4 * t8
         )
-
-        fp = np.where(np.abs(fp) < 1e-8, 1e-8, fp)
-        step = np.clip(f / fp, -0.25, 0.25)
-        theta = np.clip(theta - step, 0.0, np.deg2rad(179.0))
+        df = np.where(np.abs(df) < 1e-8, 1e-8, df)
+        step = np.clip(f / df, -0.25, 0.25)
+        theta = np.clip(
+            theta - step,
+            0.0,
+            np.deg2rad(179.0),
+        )
 
     return np.degrees(theta)
 
 
-def v1_original_theta_map(H, W, cam, source_meta):
-    if cam["model"] != "PINHOLE":
+def pinhole_angles(height, width, camera):
+    model = camera["model"]
+    params = camera["params"]
+
+    if model == "PINHOLE":
+        fx, fy, cx, cy = params[:4]
+    elif model == "SIMPLE_PINHOLE":
+        f, cx, cy = params[:3]
+        fx = fy = f
+    else:
         raise RuntimeError(
-            f"V1 source_map expects PINHOLE virtual camera, got {cam['model']}"
+            f"Angular evaluation supports OPENCV_FISHEYE, PINHOLE, and "
+            f"SIMPLE_PINHOLE; got {model}"
         )
 
-    fx, fy, cx, cy = cam["params"][:4]
+    sx, sy = scaled_intrinsics(height, width, camera)
+    fx, cx = fx * sx, cx * sx
+    fy, cy = fy * sy, cy * sy
 
-    sx = W / cam["width"]
-    sy = H / cam["height"]
+    u = np.arange(width, dtype=np.float64) + 0.5
+    v = np.arange(height, dtype=np.float64) + 0.5
+    vv, uu = np.meshgrid(v, u, indexing="ij")
 
-    fx *= sx
-    cx *= sx
-    fy *= sy
-    cy *= sy
+    x = (uu - cx) / fx
+    y = (vv - cy) / fy
+    return np.degrees(np.arctan(np.sqrt(x * x + y * y)))
 
-    u = np.arange(W, dtype=np.float64) + 0.5
-    v = np.arange(H, dtype=np.float64) + 0.5
+
+def virtual_to_original_angles(height, width, camera, source_info):
+    if camera["model"] not in {"PINHOLE", "SIMPLE_PINHOLE"}:
+        raise RuntimeError(
+            "source_map angular mapping expects a perspective virtual camera; "
+            f"got {camera['model']}"
+        )
+
+    model = camera["model"]
+    params = camera["params"]
+    if model == "PINHOLE":
+        fx, fy, cx, cy = params[:4]
+    else:
+        f, cx, cy = params[:3]
+        fx = fy = f
+
+    sx, sy = scaled_intrinsics(height, width, camera)
+    fx, cx = fx * sx, cx * sx
+    fy, cy = fy * sy, cy * sy
+
+    u = np.arange(width, dtype=np.float64) + 0.5
+    v = np.arange(height, dtype=np.float64) + 0.5
     vv, uu = np.meshgrid(v, u, indexing="ij")
 
     x = (uu - cx) / fx
     y = (vv - cy) / fy
     z = np.ones_like(x)
 
-    A = np.asarray(
-        source_meta["A_virtual_to_original"],
-        dtype=np.float64,
+    rotation = np.asarray(
+        source_info["A_virtual_to_original"], dtype=np.float64
     )
+    if rotation.shape != (3, 3):
+        raise RuntimeError("A_virtual_to_original must be a 3x3 matrix")
 
-    ox = A[0,0]*x + A[0,1]*y + A[0,2]*z
-    oy = A[1,0]*x + A[1,1]*y + A[1,2]*z
-    oz = A[2,0]*x + A[2,1]*y + A[2,2]*z
+    ox = rotation[0, 0] * x + rotation[0, 1] * y + rotation[0, 2] * z
+    oy = rotation[1, 0] * x + rotation[1, 1] * y + rotation[1, 2] * z
+    oz = rotation[2, 0] * x + rotation[2, 1] * y + rotation[2, 2] * z
 
-    return np.degrees(
-        np.arctan2(np.sqrt(ox*ox + oy*oy), oz)
-    )
-
-
-def resize_for_lpips(arr, max_dim):
-    if max_dim <= 0:
-        return arr
-
-    h, w = arr.shape[:2]
-    m = max(h, w)
-
-    if m <= max_dim:
-        return arr
-
-    scale = max_dim / m
-    nw = max(1, int(round(w * scale)))
-    nh = max(1, int(round(h * scale)))
-
-    return cv2.resize(
-        arr, (nw, nh),
-        interpolation=cv2.INTER_AREA,
-    )
+    return np.degrees(np.arctan2(np.sqrt(ox * ox + oy * oy), oz))
 
 
-def to_torch(arr):
-    return torch.from_numpy(
-        np.ascontiguousarray(arr)
-    ).permute(2, 0, 1).unsqueeze(0)
+def load_mask(mask_path: Path, shape, mode: str):
+    h, w = shape
+    if mode == "all-valid":
+        return np.ones((h, w), dtype=bool)
+
+    if not mask_path.exists():
+        if mode == "required":
+            raise RuntimeError(f"Missing mask: {mask_path}")
+        return np.ones((h, w), dtype=bool)
+
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        if mode == "required":
+            raise RuntimeError(f"Cannot read mask: {mask_path}")
+        return np.ones((h, w), dtype=bool)
+
+    if mask.shape[:2] != (h, w):
+        mask = cv2.resize(
+            mask,
+            (w, h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    valid = mask > 127
+    if not valid.any():
+        raise RuntimeError(f"Mask contains no valid pixels: {mask_path}")
+    return valid
+
+
+def erode_for_ssim(mask: np.ndarray, win_size: int):
+    kernel = np.ones((win_size, win_size), dtype=np.uint8)
+    return cv2.erode(
+        mask.astype(np.uint8),
+        kernel,
+        iterations=1,
+        borderType=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ).astype(bool)
+
+
+def parse_band_edges(text: str):
+    try:
+        edges = [float(x.strip()) for x in text.split(",") if x.strip()]
+    except ValueError as exc:
+        raise ValueError("--band-edges must contain comma-separated numbers") from exc
+
+    if len(edges) < 2 or any(b <= a for a, b in zip(edges, edges[1:])):
+        raise ValueError("--band-edges must be strictly increasing")
+    return edges
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--run", required=True)
-    ap.add_argument("--step", type=int, required=True)
-    ap.add_argument("--split", type=int, default=20)
-    ap.add_argument("--image-dir", default="images")
-
-    ap.add_argument(
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", required=True)
+    parser.add_argument("--run", required=True)
+    parser.add_argument("--step", type=int, required=True)
+    parser.add_argument("--split", type=int, default=20)
+    parser.add_argument("--image-dir", default="images")
+    parser.add_argument(
+        "--mask-mode",
+        choices=("required", "auto", "all-valid"),
+        default="required",
+    )
+    parser.add_argument("--ssim-win-size", type=int, default=7)
+    parser.add_argument(
         "--band-edges",
-        nargs="+",
-        type=float,
-        default=[0.0, 30.0, 60.0, 90.0],
+        default="0,30,60,90",
+        help="Comma-separated angular edges in degrees",
     )
-    ap.add_argument(
-        "--band-names",
-        nargs="+",
-        default=["center", "mid", "periphery"],
-    )
+    args = parser.parse_args()
 
-    ap.add_argument("--skip-lpips", action="store_true")
-    ap.add_argument("--lpips-max-dim", type=int, default=1024)
+    validate_ssim_window(args.ssim_win_size)
+    band_edges = parse_band_edges(args.band_edges)
+    default_names = ["center", "mid", "periphery"]
+    if band_edges == [0.0, 30.0, 60.0, 90.0]:
+        band_names = default_names
+    else:
+        band_names = [
+            f"{band_edges[i]:g}-{band_edges[i + 1]:g}deg"
+            for i in range(len(band_edges) - 1)
+        ]
 
-    args = ap.parse_args()
+    data_dir = Path(args.data).expanduser().resolve()
+    run_dir = Path(args.run).expanduser().resolve()
+    gt_dir = data_dir / args.image_dir
 
-    if len(args.band_names) != len(args.band_edges) - 1:
-        raise SystemExit(
-            "--band-names must have exactly len(band_edges)-1 values"
-        )
+    if not gt_dir.exists():
+        raise RuntimeError(f"Image directory does not exist: {gt_dir}")
 
-    DATA = Path(args.data).expanduser().resolve()
-    RUN = Path(args.run).expanduser().resolve()
-    GT_ROOT = DATA / args.image_dir
+    run_dir, ours_dir, render_dir = locate_render_dir(run_dir, args.step)
 
-    ours = RUN / f"ours_{args.step}"
-    renders_dir = ours / "renders"
-
-    if not renders_dir.exists():
-        candidates = list(RUN.rglob(f"ours_{args.step}/renders"))
-        if len(candidates) != 1:
-            raise RuntimeError(
-                f"Could not uniquely find step {args.step} renders; "
-                f"found {len(candidates)}"
-            )
-        renders_dir = candidates[0]
-        ours = renders_dir.parent
-        RUN = ours.parent
-
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-
+    with tempfile.TemporaryDirectory() as temp_name:
+        temp_dir = Path(temp_name)
         subprocess.run(
             [
-                "colmap", "model_converter",
-                "--input_path", str(DATA / "sparse/0"),
-                "--output_path", str(tmp),
-                "--output_type", "TXT",
+                "colmap",
+                "model_converter",
+                "--input_path",
+                str(data_dir / "sparse/0"),
+                "--output_path",
+                str(temp_dir),
+                "--output_type",
+                "TXT",
             ],
             check=True,
         )
+        cameras = read_cameras(temp_dir / "cameras.txt")
+        registered = read_images(temp_dir / "images.txt")
 
-        cams = parse_cameras_txt(tmp / "cameras.txt")
-        records = parse_images_txt(tmp / "images.txt")
-
-    test = records[::args.split] if args.split > 0 else records
-    render_files = sorted(renders_dir.glob("*.png"))
-
-    if len(render_files) != len(test):
-        raise RuntimeError(
-            f"Render count={len(render_files)} but split expects {len(test)}"
-        )
+    test_images = registered[::args.split] if args.split > 0 else registered
+    render_files = sorted_render_files(render_dir, len(test_images))
 
     source_map = {}
-    sm_path = DATA / "source_map.json"
-    if sm_path.exists():
-        source_map = json.loads(
-            sm_path.read_text()
-        ).get("virtual_images", {})
+    source_map_file = data_dir / "source_map.json"
+    if source_map_file.exists():
+        source_map = json.loads(source_map_file.read_text()).get(
+            "virtual_images", {}
+        )
 
-    lpips_metric = None
-    if not args.skip_lpips:
-        if torch is None or LearnedPerceptualImagePatchSimilarity is None:
-            raise RuntimeError(
-                "torchmetrics LPIPS unavailable; use --skip-lpips or install torchmetrics"
+    results = {band: {} for band in band_names}
+    angle_cache = {}
+    physical_cameras = set()
+
+    def add_group(group):
+        for band in band_names:
+            results[band].setdefault(
+                group,
+                {"psnr": [], "ssim": [], "valid_fraction": []},
             )
-        lpips_metric = LearnedPerceptualImagePatchSimilarity(
-            net_type="vgg",
-            normalize=True,
-        ).cpu().eval()
 
-    physical_ids = set()
-    theta_cache = {}
+    add_group("all")
 
-    data = {name: {} for name in args.band_names}
-
-    def ensure_group(group):
-        for band in args.band_names:
-            if group not in data[band]:
-                data[band][group] = {
-                    "psnr": [],
-                    "ssim": [],
-                    "lpips": [],
-                    "valid_frac": [],
-                }
-
-    ensure_group("all")
-
-    print("=" * 80)
-    print("STRATIFIED ANGULAR EVALUATION")
-    print("=" * 80)
-    print("Data      :", DATA)
-    print("Run       :", RUN)
-    print("Step      :", args.step)
-    print("Views     :", len(test))
-    print("Band edges:", args.band_edges)
-    print(
-        "Projection:",
-        "V1 cubemap/original-fisheye-angle"
-        if source_map
-        else "native fisheye"
-    )
+    print("=" * 86)
+    print("ANGULAR PSNR / SSIM EVALUATION")
+    print("=" * 86)
+    print("Data          :", data_dir)
+    print("Run           :", run_dir)
+    print("Step          :", args.step)
+    print("Views         :", len(test_images))
+    print("Split interval:", args.split)
+    print("Mask mode     :", args.mask_mode)
+    print("SSIM window   :", args.ssim_win_size)
+    print("Band edges    :", band_edges)
     print()
 
-    for idx, (rp, (name, virtual_cam_id)) in enumerate(
-        zip(render_files, test)
+    for index, (render_path, (image_name, camera_id)) in enumerate(
+        zip(render_files, test_images)
     ):
-        gp_saved = ours / "gt" / rp.name
-        gp = gp_saved if gp_saved.exists() else GT_ROOT / name
+        saved_gt = ours_dir / "gt" / render_path.name
+        source_gt = gt_dir / image_name
+        gt_path = saved_gt if saved_gt.exists() else source_gt
+        mask_path = source_gt.with_name(source_gt.stem + "_mask.png")
 
-        mp = (GT_ROOT / name).with_name(
-            Path(name).stem + "_mask.png"
-        )
+        prediction = cv2.imread(str(render_path), cv2.IMREAD_COLOR)
+        ground_truth = cv2.imread(str(gt_path), cv2.IMREAD_COLOR)
 
-        pred_bgr = cv2.imread(str(rp), cv2.IMREAD_COLOR)
-        gt_bgr = cv2.imread(str(gp), cv2.IMREAD_COLOR)
-        mask = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        if prediction is None:
+            raise RuntimeError(f"Cannot read render: {render_path}")
+        if ground_truth is None:
+            raise RuntimeError(f"Cannot read GT: {gt_path}")
 
-        if pred_bgr is None:
-            raise RuntimeError(f"Cannot read {rp}")
-        if gt_bgr is None:
-            raise RuntimeError(f"Cannot read {gp}")
-        if mask is None:
-            raise RuntimeError(f"Cannot read {mp}")
-
-        H, W = pred_bgr.shape[:2]
-
-        if gt_bgr.shape[:2] != (H, W):
-            raise RuntimeError(f"GT/render shape mismatch for {name}")
-
-        if mask.shape[:2] != (H, W):
-            mask = cv2.resize(
-                mask, (W, H),
-                interpolation=cv2.INTER_NEAREST,
+        height, width = prediction.shape[:2]
+        if ground_truth.shape[:2] != (height, width):
+            raise RuntimeError(
+                f"GT/render size mismatch for {image_name}: "
+                f"render={prediction.shape[:2]} gt={ground_truth.shape[:2]}"
             )
 
-        if name in source_map:
-            meta = source_map[name]
-            physical_cam = int(meta["source_camera_id"])
-            cache_key = ("v1", virtual_cam_id, meta["face"], H, W)
+        valid = load_mask(mask_path, (height, width), args.mask_mode)
+        camera = cameras[camera_id]
 
-            if cache_key not in theta_cache:
-                theta_cache[cache_key] = v1_original_theta_map(
-                    H, W,
-                    cams[virtual_cam_id],
-                    meta,
+        if image_name in source_map:
+            info = source_map[image_name]
+            physical_camera = int(info["source_camera_id"])
+            cache_key = (
+                "virtual",
+                camera_id,
+                info.get("face", image_name),
+                height,
+                width,
+            )
+            if cache_key not in angle_cache:
+                angle_cache[cache_key] = virtual_to_original_angles(
+                    height, width, camera, info
+                )
+        elif camera["model"] == "OPENCV_FISHEYE":
+            physical_camera = camera_id
+            cache_key = ("fisheye", camera_id, height, width)
+            if cache_key not in angle_cache:
+                angle_cache[cache_key] = fisheye_angles(
+                    height, width, camera
+                )
+        elif camera["model"] in {"PINHOLE", "SIMPLE_PINHOLE"}:
+            physical_camera = camera_id
+            cache_key = ("pinhole", camera_id, height, width)
+            if cache_key not in angle_cache:
+                angle_cache[cache_key] = pinhole_angles(
+                    height, width, camera
                 )
         else:
-            physical_cam = virtual_cam_id
-            cache_key = ("fisheye", virtual_cam_id, H, W)
+            raise RuntimeError(
+                f"Unsupported camera model for angular evaluation: "
+                f"{camera['model']} ({image_name})"
+            )
 
-            if cache_key not in theta_cache:
-                cam = cams[virtual_cam_id]
-                if cam["model"] != "OPENCV_FISHEYE":
-                    raise RuntimeError(
-                        f"Expected OPENCV_FISHEYE, got {cam['model']} for {name}"
-                    )
-                theta_cache[cache_key] = fisheye_theta_map(H, W, cam)
+        theta = angle_cache[cache_key]
+        physical_cameras.add(physical_camera)
+        add_group(f"cam{physical_camera}")
 
-        theta = theta_cache[cache_key]
-
-        physical_ids.add(physical_cam)
-        ensure_group(f"cam{physical_cam}")
-
-        pred = cv2.cvtColor(
-            pred_bgr, cv2.COLOR_BGR2RGB
+        prediction = cv2.cvtColor(
+            prediction, cv2.COLOR_BGR2RGB
         ).astype(np.float32) / 255.0
-
-        gt = cv2.cvtColor(
-            gt_bgr, cv2.COLOR_BGR2RGB
+        ground_truth = cv2.cvtColor(
+            ground_truth, cv2.COLOR_BGR2RGB
         ).astype(np.float32) / 255.0
-
-        valid = mask > 127
 
         _, ssim_map = structural_similarity(
-            gt, pred,
+            ground_truth,
+            prediction,
             channel_axis=2,
             data_range=1.0,
+            win_size=args.ssim_win_size,
             full=True,
         )
-
         if ssim_map.ndim == 3:
             ssim_map = ssim_map.mean(axis=2)
 
-        diff2 = (pred - gt) ** 2
+        squared_error = (prediction - ground_truth) ** 2
 
         print(
-            f"{idx:03d} physical_cam{physical_cam} "
-            f"{rp.name} <- {name}"
+            f"{index:03d} cam{physical_camera} "
+            f"{render_path.name} <- {image_name} "
+            f"model={camera['model']}"
         )
 
-        for bi, band in enumerate(args.band_names):
-            lo = args.band_edges[bi]
-            hi = args.band_edges[bi + 1]
+        for band_index, band in enumerate(band_names):
+            lower = band_edges[band_index]
+            upper = band_edges[band_index + 1]
 
-            angular = (theta >= lo) & (theta < hi)
-            band_mask = angular & valid
+            angular_region = (theta >= lower) & (theta < upper)
+            evaluation_mask = angular_region & valid
 
-            angular_count = int(angular.sum())
-            n = int(band_mask.sum())
+            total_pixels = int(angular_region.sum())
+            valid_pixels = int(evaluation_mask.sum())
 
-            if n == 0:
+            if valid_pixels == 0:
                 continue
 
-            valid_frac = n / angular_count if angular_count > 0 else 0.0
-
-            mse = float(diff2[band_mask].mean())
+            mse = float(squared_error[evaluation_mask].mean())
             psnr = -10.0 * np.log10(max(mse, 1e-12))
 
-            eroded = cv2.erode(
-                band_mask.astype(np.uint8),
-                np.ones((7, 7), np.uint8),
-                iterations=1,
-            ).astype(bool)
+            ssim_valid = erode_for_ssim(
+                evaluation_mask, args.ssim_win_size
+            )
+            if not ssim_valid.any():
+                raise RuntimeError(
+                    f"No valid SSIM support for {image_name}, band {band}."
+                )
+            ssim = float(ssim_map[ssim_valid].mean())
 
-            ssim = float(
-                ssim_map[eroded].mean()
-                if eroded.any()
-                else ssim_map[band_mask].mean()
+            valid_fraction = (
+                valid_pixels / total_pixels if total_pixels > 0 else 0.0
             )
 
-            lpips = None
+            for group in ("all", f"cam{physical_camera}"):
+                values = results[band][group]
+                values["psnr"].append(psnr)
+                values["ssim"].append(ssim)
+                values["valid_fraction"].append(valid_fraction)
 
-            if lpips_metric is not None:
-                composite = gt.copy()
-                composite[band_mask] = pred[band_mask]
-
-                composite = resize_for_lpips(
-                    composite,
-                    args.lpips_max_dim,
-                )
-                gt_small = resize_for_lpips(
-                    gt,
-                    args.lpips_max_dim,
-                )
-
-                with torch.no_grad():
-                    lpips = float(
-                        lpips_metric(
-                            to_torch(composite).cpu(),
-                            to_torch(gt_small).cpu(),
-                        ).item()
-                    )
-
-            for group in ("all", f"cam{physical_cam}"):
-                d = data[band][group]
-                d["psnr"].append(psnr)
-                d["ssim"].append(ssim)
-                d["valid_frac"].append(valid_frac)
-                if lpips is not None:
-                    d["lpips"].append(lpips)
-
-    def print_group(group):
+    def print_results(group):
         print()
-        print("=" * 92)
+        print("=" * 86)
         print(group.upper())
-        print("=" * 92)
-
+        print("=" * 86)
         print(
-            f"{'Band':<14}"
+            f"{'Band':<16}"
             f"{'N':<6}"
             f"{'PSNR':<11}"
-            f"{'std':<10}"
+            f"{'PSNR std':<12}"
             f"{'SSIM':<11}"
-            f"{'LPIPS':<11}"
+            f"{'SSIM std':<12}"
             f"{'valid_frac':<12}"
         )
-        print("-" * 92)
+        print("-" * 86)
 
-        for band in args.band_names:
-            d = data[band].get(group)
-
-            if not d or not d["psnr"]:
-                print(f"{band:<14}0     -- no valid pixels --")
+        for band in band_names:
+            values = results[band].get(group)
+            if not values or not values["psnr"]:
+                print(f"{band:<16}{0:<6}{'no pixels in this band'}")
                 continue
 
-            p = np.asarray(d["psnr"], dtype=float)
-            s = np.asarray(d["ssim"], dtype=float)
-            l = np.asarray(d["lpips"], dtype=float)
-            vf = np.asarray(d["valid_frac"], dtype=float)
-
-            lpips_text = f"{l.mean():.4f}" if len(l) else "--"
-
-            print(
-                f"{band:<14}"
-                f"{len(p):<6}"
-                f"{p.mean():<11.3f}"
-                f"{p.std():<10.3f}"
-                f"{s.mean():<11.4f}"
-                f"{lpips_text:<11}"
-                f"{vf.mean():<12.3f}"
+            psnr = np.asarray(values["psnr"], dtype=float)
+            ssim = np.asarray(values["ssim"], dtype=float)
+            valid_fraction = np.asarray(
+                values["valid_fraction"], dtype=float
             )
 
-    print_group("all")
-    for cid in sorted(physical_ids):
-        print_group(f"cam{cid}")
+            print(
+                f"{band:<16}"
+                f"{len(psnr):<6}"
+                f"{psnr.mean():<11.3f}"
+                f"{psnr.std():<12.3f}"
+                f"{ssim.mean():<11.4f}"
+                f"{ssim.std():<12.4f}"
+                f"{valid_fraction.mean():<12.3f}"
+            )
+
+    print_results("all")
+    for camera_id in sorted(physical_cameras):
+        print_results(f"cam{camera_id}")
 
 
 if __name__ == "__main__":
